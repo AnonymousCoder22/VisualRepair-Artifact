@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>hljs new-version test</title>
+  <link rel="stylesheet" href="./build/demo/styles/rainbow.css">
+</head>
+<body>
+<pre><code class="language-javascript">const x = 1;
+
+function greet(name) {
+  return `hello, ${name}`;
+}
+
+const result = greet('world');
+console.log(result);</code></pre>
+
+<script src="./build/highlight.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var block = document.querySelector('pre code');
+
+  console.log('hljs =', typeof hljs);
+  console.log('block exists =', !!block);
+  console.log('before class =', block ? block.className : null);
+  console.log('before html =', block ? block.innerHTML : null);
+
+  if (hljs.highlightAll) {
+    hljs.highlightAll();
+    console.log('used highlightAll()');
+    console.log('after class =', block ? block.className : null);
+    console.log('after html =', block ? block.innerHTML : null);
+  } else {
+    console.log('highlightAll is not available');
+  }
+});
+</script>
+</body>
+</html>

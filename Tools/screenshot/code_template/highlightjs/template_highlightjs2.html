@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>hljs old-version test</title>
+  <link rel="stylesheet" href="./build/demo/styles/rainbow.css">
+</head>
+<body>
+<pre><code class="language-bash">jcmd $(pgrep java) JFR.check
+
+jfr print \
+  --json \
+  --events jdk.ThreadPark \
+  /gclogs/startup.jfr \
+  | jq '.recording.events[] | .values.duration'
+
+jshell -s - << EOF
+System.out.printf("Procs: %s%n", Runtime.getRuntime().availableProcessors())
+EOF
+
+jshell -s - <<<'System.out.printf("Procs: %s%n", Runtime.getRuntime().availableProcessors())'</code></pre>
+
+<script src="./build/highlight.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var block = document.querySelector('pre code');
+
+  console.log('hljs =', typeof hljs);
+  console.log('block exists =', !!block);
+  console.log('before class =', block ? block.className : null);
+  console.log('before html =', block ? block.innerHTML : null);
+
+  if (block && hljs.highlightBlock) {
+    hljs.highlightBlock(block);
+    console.log('after class =', block.className);
+    console.log('after html =', block.innerHTML);
+  } else if (hljs.initHighlightingOnLoad) {
+    hljs.initHighlightingOnLoad();
+    console.log('used initHighlightingOnLoad');
+  } else {
+    console.log('No compatible highlight API found');
+  }
+});
+</script>
+</body>
+</html>

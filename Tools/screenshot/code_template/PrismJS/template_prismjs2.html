@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+    <link rel="stylesheet" href="./themes/prism-tomorrow.css"> 
+    <!-- 背景颜色 -->
+</head>
+<body>
+
+<pre><code class="language-plain">List&lt;Contact&gt; contacts = [ SELECT Id, AccountId FROM Contact ];
+
+Map&lt;Id, List&lt;Contact&gt;&gt; contactsByAccountIds = new Map&lt;Id, List&lt;Contact&gt;&gt;();
+for (Contact contact : contacts) {
+    if (contactsByAccountIds.containsKey(contact.AccountId)) {
+        List&lt;Contact&gt; existing = contactsByAccountIds.get(contact.AccountId);
+        existing.add(contact);
+        contactsByAccountIds.put(contact.AccountId, existing);
+    } else {
+        List&lt;Contact&gt; newList = new List&lt;Contact&gt;();
+        newList.add(contact);
+        contactsByAccountIds.put(contact.AccountId, newList);
+    }
+}</code></pre>
+
+<script>
+  window.Prism = window.Prism || {};
+  Prism.manual = true;
+</script>
+<script src="./prism.js"></script>
+<script src="./components/prism-apex.js"></script>
+<!-- 改相对应语言 -->
+<script src="./plugins/autoloader/prism-autoloader.js"></script>
+<!-- 会多一个plugins的文件的调用 -->
+<script>Prism.highlightAll();</script>
+
+
+<!-- <script src="./prism.js"></script>
+<script src="./components/prism-sql.min.js"></script> -->
+</body>
+</html>
+
+<!-- "E:\project\guirepair\Reproduce_Scenario\test\PrismJS\PrismJS__prism-1500\REPO\prism\code.js" --> 

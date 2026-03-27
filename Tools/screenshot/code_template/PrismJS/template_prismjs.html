@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+    <link rel="stylesheet" href="./themes/prism-tomorrow.css"> 
+    <!-- 背景颜色 -->
+</head>
+<body>
+
+<pre><code class="language-sql">
+INSERT INTO MESSAGESEARCHPATTERN (name, query)VALUES ('a', 'select ''hello world'' from a')
+-- this is a comment
+INSERT INTO MESSAGESEARCHPATTERN (name, query)VALUES ('a','select ''hello world''from a')
+</code></pre>
+
+<script>
+  window.Prism = window.Prism || {};
+  Prism.manual = true;
+</script>
+<script src="./prism.js"></script>
+<script src="./components/prism-sql.js"></script>
+<!-- 改相对应语言 -->
+<script>Prism.highlightAll();</script>
+
+
+<!-- <script src="./prism.js"></script>
+<script src="./components/prism-sql.min.js"></script> -->
+</body>
+</html>
+
+<!-- "E:\project\guirepair\Reproduce_Scenario\test\PrismJS\PrismJS__prism-1500\REPO\prism\code.js" --> 

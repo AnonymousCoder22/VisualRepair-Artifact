@@ -1,0 +1,15 @@
+{
+  "name": "screenshot",
+  "version": "1.0.0",
+  "description": "更完整的项目流程与调用链说明见：`docs/PROJECT_FLOW.md`。",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "playwright": "^1.58.2"
+  }
+}
