@@ -4,6 +4,7 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+WORKSPACE_ROOT="$(cd "${PROJECT_ROOT}/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 
@@ -11,13 +12,13 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 task="run"                                    # run/val
 output_file="result.json"
 base_model="o3"
-output_dir="${PROJECT_ROOT}/${base_model}/result_FULL"
+output_dir="${PROJECT_ROOT}/${base_model}/result"
 dataset="princeton-nlp/SWE-bench_Multimodal"
 dataset_split="test"
 val_patch_no="1"                              # 1-n to validate; 0 to replay scenario
-instance_id="${GUIREPAIR_INSTANCE_ID:-GoogleChrome}"   # supports full instance id, repo selector (e.g. PrismJS), or multiple selectors (e.g. "PrismJS highlightjs")
+instance_id="${GUIREPAIR_INSTANCE_ID:-highlightjs}"   # supports full instance id, repo selector (e.g. PrismJS), or multiple selectors (e.g. "PrismJS highlightjs")
 
-repo_path="${PROJECT_ROOT}/Reproduce_Scenario"
+repo_path="${GUIREPAIR_REPO_PATH:-${WORKSPACE_ROOT}/Reproduce_Scenario}"
 log_file="repair_${task}.log"
 Code_Reply="True"
 doc_RAG_query="False"
@@ -26,10 +27,7 @@ keywords_searching="False"
 Checked_Exception="True"
 Patch_Check="False"
 Patch_Select="True"
-Overwrite_Code0="${GUIREPAIR_OVERWRITE_CODE0:-True}"
-Variant_Gen_By_LLM="${GUIREPAIR_VARIANT_GEN_BY_LLM:-True}"
-Variant_LLM_Only="${GUIREPAIR_VARIANT_LLM_ONLY:-True}"
-Variant_Max_Chars="${GUIREPAIR_VARIANT_MAX_CHARS:-120000}"
+Overwrite_Code0="${GUIREPAIR_OVERWRITE_CODE0:-False}"
 
 File_Sort="True"
 max_lines_per_snippet="500"
@@ -52,7 +50,7 @@ key_bug_class_function_samples="2"
 line_level_fl_temperature="0.9"
 line_level_fl_samples="40"
 patch_generation_temperature="1"
-patch_generation_samples="8"
+patch_generation_samples="2"
 ground_patch_generation_samples="1"
 wait_time_after_api_request="0"
 wait_time_after_build="0"
@@ -100,9 +98,6 @@ main_args=(
   --Patch_Check "$Patch_Check"
   --Patch_Select "$Patch_Select"
   --Overwrite_Code0 "$Overwrite_Code0"
-  --Variant_Gen_By_LLM "$Variant_Gen_By_LLM"
-  --Variant_LLM_Only "$Variant_LLM_Only"
-  --Variant_Max_Chars "$Variant_Max_Chars"
   --File_Sort "$File_Sort"
 )
 

@@ -5,16 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Chart.js Getting Started</title>
   <style>
+    :root {
+      --page-padding: 24px;
+      --page-background: #ffffff;
+      --chart-width: 1600px;
+      --chart-height: 800px;
+      --card-background: transparent;
+      --card-shadow: none;
+    }
+
     body {
       margin: 0;
-      padding: 24px;
+      padding: var(--page-padding);
+      background: var(--page-background);
       font-family: sans-serif;
     }
 
     .chart-container {
-      width: 800px;
+      width: var(--chart-width);
+      height: var(--chart-height);
       max-width: 100%;
       margin: 0 auto;
+      position: relative;
+      background: var(--card-background);
+      box-shadow: var(--card-shadow);
     }
 
     .chart-source {
@@ -45,20 +59,113 @@
   }
 }</code></pre>
 
-  <script src="./dist/chart.umd.js"></script>
   <script>
-    const ctx = document.getElementById('myChart');
+    const runtimeMeta = window.__GUIREPAIR_CHARTJS_META__ || {};
+    const rootStyle = document.documentElement.style;
+    const canvasEl = document.getElementById('myChart');
+    const chartContainer = document.querySelector('.chart-container');
     const configSource = document.getElementById('chart-config-source');
     const rawChartSource = configSource ? configSource.textContent.trim() : '';
+    const canvasCtx = canvasEl && typeof canvasEl.getContext === 'function'
+      ? canvasEl.getContext('2d')
+      : null;
+    const chartBundleCandidates = [
+      './dist/chart.umd.js',
+      './dist/chart.js',
+      './dist/chart.min.js',
+      './dist/Chart.js',
+      './dist/Chart.min.js'
+    ];
 
-    if (rawChartSource) {
-      if (/new\s+Chart\s*\(/i.test(rawChartSource) || /\bChart\s*\(/.test(rawChartSource)) {
-        new Function('Chart', 'ctx', rawChartSource)(Chart, ctx);
-      } else {
-        const config = new Function(`return (${rawChartSource});`)();
-        new Chart(ctx, config);
+    function applyRuntimeMetaLayout() {
+      const pagePadding = Number.isFinite(Number(runtimeMeta.page_padding))
+        ? Math.max(0, Number(runtimeMeta.page_padding))
+        : 24;
+      const visibleChartCount = Number.isFinite(Number(runtimeMeta.visible_chart_count))
+        ? Math.max(1, Number(runtimeMeta.visible_chart_count))
+        : 1;
+      const cardWidth = Number.isFinite(Number(runtimeMeta.card_width))
+        ? Math.max(180, Number(runtimeMeta.card_width))
+        : 1600;
+      const chartHeight = Number.isFinite(Number(runtimeMeta.chart_height))
+        ? Math.max(100, Number(runtimeMeta.chart_height))
+        : 800;
+      const headerHeight = visibleChartCount > 1 ? 64 : 24;
+      const cardHeight = chartHeight + headerHeight;
+
+      rootStyle.setProperty('--page-padding', `${pagePadding}px`);
+      rootStyle.setProperty('--page-background', runtimeMeta.page_background || '#ffffff');
+      rootStyle.setProperty('--chart-width', `${cardWidth}px`);
+      rootStyle.setProperty('--chart-height', `${cardHeight}px`);
+      rootStyle.setProperty('--card-background', runtimeMeta.card_background || 'transparent');
+      rootStyle.setProperty('--card-shadow', runtimeMeta.card_shadow || 'none');
+
+      if (chartContainer) {
+        chartContainer.style.width = `${cardWidth}px`;
+        chartContainer.style.height = `${cardHeight}px`;
       }
     }
+
+    function loadChartBundle(src) {
+      return new Promise((resolve, reject) => {
+        const existing = document.querySelector(`script[data-chart-bundle="${src}"]`);
+        if (existing) {
+          existing.addEventListener('load', () => resolve(window.Chart), { once: true });
+          existing.addEventListener('error', () => reject(new Error(`failed to load ${src}`)), { once: true });
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = false;
+        script.dataset.chartBundle = src;
+        script.onload = () => resolve(window.Chart);
+        script.onerror = () => reject(new Error(`failed to load ${src}`));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function ensureChartLoaded() {
+      if (window.Chart) {
+        return window.Chart;
+      }
+
+      const errors = [];
+      for (const src of chartBundleCandidates) {
+        try {
+          const chartLib = await loadChartBundle(src);
+          if (chartLib) {
+            return chartLib;
+          }
+        } catch (error) {
+          errors.push(error && error.message ? error.message : String(error));
+        }
+      }
+
+      throw new Error(`Unable to load Chart.js bundle. Tried: ${errors.join('; ')}`);
+    }
+
+    async function bootstrapChart() {
+      if (!rawChartSource) {
+        return;
+      }
+
+      applyRuntimeMetaLayout();
+      const ChartLib = await ensureChartLoaded();
+      window.canvas = canvasEl;
+      window.ctx = canvasCtx;
+
+      if (/new\s+Chart\s*\(/i.test(rawChartSource) || /\bChart\s*\(/.test(rawChartSource)) {
+        new Function('Chart', rawChartSource)(ChartLib);
+      } else {
+        const config = new Function(`return (${rawChartSource});`)();
+        new ChartLib(canvasEl || canvasCtx, config);
+      }
+    }
+
+    bootstrapChart().catch((error) => {
+      console.error(error && error.stack ? error.stack : String(error));
+    });
   </script>
 </body>
 </html>

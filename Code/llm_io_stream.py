@@ -1,5 +1,6 @@
 import os
 import subprocess
+import logging
 from openai import OpenAI
 import anthropic
 from pydantic import BaseModel
@@ -8,7 +9,13 @@ import time
 import re
 
 import json5  # You might need to install this: pip install json5
-from Code.model_utils import is_reasoning_model
+try:
+    from model_utils import is_reasoning_model
+except ImportError:
+    from Code.model_utils import is_reasoning_model
+
+
+logger = logging.getLogger(__name__)
 
 
 def make_token_usage(base_model: str = ""):
@@ -27,6 +34,56 @@ def add_token_usage(target, usage):
     target["completion_tokens"] = int(target.get("completion_tokens") or 0) + int(getattr(usage, "completion_tokens", 0) or 0)
     target["total_tokens"] = int(target.get("total_tokens") or 0) + int(getattr(usage, "total_tokens", 0) or 0)
     return target
+
+
+def is_retryable_openai_error(exc) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {408, 409, 429, 500, 502, 503, 504}:
+        return True
+
+    exc_name = exc.__class__.__name__
+    if exc_name in {
+        "APIConnectionError",
+        "APITimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+    }:
+        return True
+
+    cause = getattr(exc, "__cause__", None)
+    cause_name = cause.__class__.__name__ if cause is not None else ""
+    return cause_name in {
+        "ProxyError",
+        "ConnectError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "WriteError",
+    }
+
+
+def openai_parse_with_retry(client, request_kwargs, max_attempts: int = 6):
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.beta.chat.completions.parse(**request_kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_attempts or not is_retryable_openai_error(exc):
+                raise
+            wait_seconds = min(30, 2 ** (attempt - 1))
+            cause = getattr(exc, "__cause__", None)
+            cause_name = cause.__class__.__name__ if cause is not None else ""
+            logger.warning(
+                "Transient OpenAI parse failure on attempt %s/%s: %s%s. Retry in %ss.",
+                attempt,
+                max_attempts,
+                exc.__class__.__name__,
+                f" (cause={cause_name})" if cause_name else "",
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+    raise last_exc
 
 def extract_json_from_text_refine(text: str, debug: bool = False):
 
@@ -404,19 +461,6 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
     class RefinedPatchFunction(BaseModel):
         Refined_Patch: str
 
-    class VariantAppliedEdit(BaseModel):
-        edit_index: int
-        original_matched_text: str
-        new_replacement_text: str
-        note: str = ""
-
-    class VariantFileGeneration(BaseModel):
-        status: str
-        rel_path: str
-        content: str
-        applied_edits: list[VariantAppliedEdit]
-        error: str = ""
-
 
     openai_api_key = getattr(args, "openai_api_key", "") or os.getenv("OPENAI_API_KEY") or ""
     openai_base_url = (
@@ -431,7 +475,11 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
         client_kwargs["api_key"] = openai_api_key
     if openai_base_url:
         client_kwargs["base_url"] = openai_base_url
+    client_kwargs["max_retries"] = 0
     client = OpenAI(**client_kwargs)
+
+    def parse_with_retry(**request_kwargs):
+        return openai_parse_with_retry(client, request_kwargs)
 
     if is_reasoning_model(args.base_model):
         temperature = 1
@@ -441,7 +489,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
 
     # find documents
     if "src/path/document_1.js" in system_prompt and 'Document Structure' in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples,  # Request multiple completions
@@ -471,7 +519,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
 
     # generate reproduce code
     if "reproduce_code" in system_prompt and 'Related Documents' in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples,  # Request multiple completions
@@ -502,7 +550,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
 
     # locate file-level
     if "src/bug_file1.js" in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples,  # Request multiple completions
@@ -532,7 +580,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
 
     # generate bug keywords
     if "bug_keywords" in system_prompt and "Explanation of why these keywords may appear in the bug files." in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples,  # Request multiple completions
@@ -563,7 +611,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
 
     # locate Class/Function-level
     if "class_name_1" in system_prompt and "function_name_1" in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples,  # Request multiple completions
@@ -594,7 +642,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
 
     # locate line-level
     if "why these bug lines are" in system_prompt and "output the bug line number" in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples,  # Request multiple completions
@@ -634,7 +682,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
         else:
             temperature_patch=0.0
  
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature_patch,
             n=1,  # Request one completions
@@ -656,7 +704,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
             results[f'{1}/{samples}'] = result.content
         
         if samples > 1:
-            completions = client.beta.chat.completions.parse(
+            completions = parse_with_retry(
                 model=args.base_model,
                 temperature=temperature,
                 n=samples-1,  # Request multiple completions
@@ -687,7 +735,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
             temperature_selected = 1
         else:
             temperature_selected = 0.0
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature_selected,
             n=1,
@@ -718,7 +766,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
     if "Refined Patch" in system_prompt:
         results = {}
 
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=0.0,
             n=1,  # Request one completions
@@ -745,7 +793,7 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
  
     # analyze repair feedback
     if "infering what the correct rendering" in system_prompt:
-        completions = client.beta.chat.completions.parse(
+        completions = parse_with_retry(
             model=args.base_model,
             temperature=temperature,
             n=samples, 
@@ -777,38 +825,6 @@ def openai_chat(system_prompt, user_prompt, args, temperature, samples):
             results[key]['patch_analyze'] = result.patch_analyze
             results[key]['final_answer'] = result.final_answer
 
-    # generate patch-variant file content (syntax-highlighting validation)
-    if "VARIANT_FILE_GENERATION" in system_prompt:
-        results = {}
-        completions = client.beta.chat.completions.parse(
-            model=args.base_model,
-            temperature=0.0,
-            n=1,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format=VariantFileGeneration,
-        )
-        add_token_usage(token_usage, completions.usage)
-        for key, completion in enumerate(completions.choices):
-            key += 1
-            result = completion.message.parsed
-            results[key] = {
-                "status": result.status,
-                "rel_path": result.rel_path,
-                "content": result.content,
-                "applied_edits": [
-                    {
-                        "edit_index": e.edit_index,
-                        "original_matched_text": e.original_matched_text,
-                        "new_replacement_text": e.new_replacement_text,
-                        "note": getattr(e, "note", "") or "",
-                    }
-                    for e in (result.applied_edits or [])
-                ],
-                "error": getattr(result, "error", "") or "",
-            }
 
     if completions is None:
         completions = client.chat.completions.create(

@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def is_nonempty_file(path: str) -> bool:
@@ -16,6 +17,33 @@ def is_nonempty_file(path: str) -> bool:
 
 def project_root_from_code_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def resolve_screenshot_script(project_root: str, repo_basename: str) -> str:
+    project_root_path = Path(project_root)
+    screenshot_root = project_root_path / "Tools" / "screenshot"
+    script_candidates = {
+        "prism": [
+            screenshot_root / "prismjs_capture_from_bug_info.cjs",
+        ],
+        "highlight.js": [
+            screenshot_root / "highlightjs_capture_from_bug_info.cjs",
+        ],
+        "Chart.js": [
+            screenshot_root / "chartjs_capture_from_bug_info.cjs",
+        ],
+        "marked": [
+            screenshot_root / "markedjs_capture_from_bug_info.cjs",
+        ],
+        "react-pdf": [
+            screenshot_root / "reactpdf_capture_from_bug_info.cjs",
+        ],
+    }
+
+    for candidate in script_candidates.get(repo_basename, []):
+        if candidate.is_file():
+            return str(candidate)
+    return ""
 
 
 def resolve_instance_root(repo_path: str, dataset_split: str, instance_id: str) -> str:
@@ -69,32 +97,32 @@ def build_screenshot_cmd(repo_dir: str, baseline_png: str, html_file: str, insta
     project_root = project_root_from_code_dir()
     script_map = {
         "prism": {
-            "script": "prismjs_capture_from_bug_info.cjs",
             "mode_env": "GUIREPAIR_PRISM_SCREENSHOT_MODE",
             "mode_default": "playwright",
         },
         "highlight.js": {
-            "script": "highlightjs_capture_from_bug_info.cjs",
             "mode_env": "GUIREPAIR_HIGHLIGHTJS_SCREENSHOT_MODE",
             "mode_default": "playwright",
         },
         "Chart.js": {
-            "script": "chartjs_capture_from_bug_info.cjs",
             "mode_env": "GUIREPAIR_CHARTJS_SCREENSHOT_MODE",
             "mode_default": "playwright",
         },
         "marked": {
-            "script": "markedjs_capture_from_bug_info.cjs",
             "mode_env": "GUIREPAIR_MARKEDJS_SCREENSHOT_MODE",
             "mode_default": "playwright",
+        },
+        "react-pdf": {
+            "mode_env": "GUIREPAIR_REACTPDF_SCREENSHOT_MODE",
+            "mode_default": "",
         },
     }
     script_meta = script_map.get(repo_basename)
     if not script_meta:
         return []
-    script_path = os.path.join(project_root, "Tools", "screenshot", script_meta["script"])
+    script_path = resolve_screenshot_script(project_root, repo_basename)
 
-    if not os.path.isfile(script_path):
+    if not script_path:
         return []
 
     cmd = ["node", script_path, "--repo", repo_dir, "--out", baseline_png]
@@ -105,12 +133,14 @@ def build_screenshot_cmd(repo_dir: str, baseline_png: str, html_file: str, insta
         cmd.extend(["--mode", mode])
     if html_file:
         cmd.extend(["--html", html_file])
+    if repo_basename == "react-pdf":
+        cmd.append("--force-build")
     return cmd
 
 
 def requires_feedback_multi(repo_dir: str) -> bool:
     repo_basename = os.path.basename(os.path.normpath(repo_dir or ""))
-    return repo_basename in {"prism", "highlight.js", "Chart.js", "marked"}
+    return repo_basename in {"prism", "highlight.js", "Chart.js", "marked", "react-pdf"}
 
 
 def try_generate_baseline_image(

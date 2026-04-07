@@ -269,7 +269,7 @@ async function main() {
   const pageUrl = `http://127.0.0.1:${port}${htmlEntry.pagePath}`;
 
   try {
-    const viewport = [1200, 800];
+    const viewport = [2400, 1600];
     let finalMode = mode;
     if (finalMode === 'auto') {
       finalMode = 'playwright';

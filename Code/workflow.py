@@ -37,6 +37,11 @@ if tools_path not in sys.path:
     sys.path.insert(0, tools_path)
 
 from Tools.preprocess.ground import process_single_image_folder
+from Tools.preprocess.ocr_paddle import run_ocr
+
+def is_highlight_or_prism(input_dir: str):
+    name = input_dir.lower()
+    return ("highlightjs" in name) or ("prismjs" in name)
 
 def has_exactly_one_valid_image(input_dir: str) -> bool:
     if not os.path.isdir(input_dir):
@@ -81,7 +86,6 @@ def patch_selection_prompt_construction(
     patch_candidates,
     image_file_list
 ):
-    import json
 
     patch_str = json.dumps(patch_candidates, indent=2)
 
@@ -164,6 +168,13 @@ PREPROCESS_SKIP_REPOS = {
     "prismjs/prism",
     "chartjs/chart.js",
     "markedjs/marked",
+    "diegomura/react-pdf",
+}
+
+GROUNDING_SKIP_REPOS = {
+    "highlightjs/highlight.js",
+    "chartjs/chart.js",
+    "diegomura/react-pdf",
 }
 
 RUNTIME_WEB_REPOS = {
@@ -226,6 +237,10 @@ def should_skip_preprocess_for_repo(repo: str) -> bool:
     return (repo or "").strip().lower() in PREPROCESS_SKIP_REPOS
 
 
+def should_skip_grounding_for_repo(repo: str) -> bool:
+    return (repo or "").strip().lower() in GROUNDING_SKIP_REPOS
+
+
 def normalize_repo_name(repo: str) -> str:
     return (repo or "").strip().lower()
 
@@ -233,6 +248,12 @@ def normalize_repo_name(repo: str) -> str:
 def get_instance_prebuild_meta(instance_repo_path: str):
     repo_basename = os.path.basename(os.path.normpath(instance_repo_path)).lower()
     return INSTANCE_PREBUILD_REPOS.get(repo_basename)
+
+def should_reuse_instance_prebuild_result(instance_repo_path: str) -> bool:
+    repo_basename = os.path.basename(os.path.normpath(instance_repo_path)).lower()
+    if repo_basename == "highlight.js":
+        return False
+    return True
 
 
 def run_build_gate(instance_repo_path, build_cmd, logger, log_prefix):
@@ -1117,19 +1138,68 @@ def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
     
-def get_bug_scenarion_images(image_sets_path, args):
-    # print(image_sets_path)
-    image_file_list = []
-    if os.path.isdir(image_sets_path): # is dir
-        image_file_list = os.listdir(image_sets_path)
-    else: # not dir, is file path
-        image_file_list = [image_sets_path]
-    # print(image_file_list)
+# def get_bug_scenarion_images(image_sets_path, args):
+#     # print(image_sets_path)
+#     image_file_list = []
+#     if os.path.isdir(image_sets_path): # is dir
+#         image_file_list = os.listdir(image_sets_path)
+#     else: # not dir, is file path
+#         image_file_list = [image_sets_path]
+#     # print(image_file_list)
     
+#     if image_file_list is not None:
+#         for index, image_file in enumerate(image_file_list):
+#             if os.path.isdir(image_sets_path):
+#                 image_path = os.path.join(image_sets_path, image_file) # Path to your image
+#             else:
+#                 image_path = image_file
+            
+#             image_type = 'png'
+#             if 'png' in image_path:
+#                 image_type = 'png'
+#             elif 'jpg' in image_path:
+#                 image_type = 'jpg'
+#                 if is_claude_model(args.base_model): image_type = 'jpeg'
+#             elif 'jpeg' in image_path:
+#                 image_type = 'jpeg'
+#             elif 'gif' in image_path:
+#                 image_type = 'gif'
+#             else:
+#                 image_type = image_path.split('.')[-1].strip()
+            
+#             if is_openai_compatible_model(args.base_model):
+#                 base64_image = encode_image(image_path) # Getting the Base64 string
+#                 image_file_list[index] = {
+#                     "type": "image_url",
+#                     "image_url": {"url": f"data:image/{image_type};base64,{base64_image}"},
+#                 }
+#             elif is_claude_model(args.base_model):
+#                 base64_image = encode_image_claude(image_path)
+#                 image_file_list[index] = {
+#                     "type": "image",
+#                     "source": {
+#                         "type": "base64",
+#                         "media_type": f"image/{image_type}",
+#                         "data": base64_image,
+#                     },
+#                 }
+
+#     return image_file_list
+
+
+def get_bug_scenarion_images(image_sets_path, args):
+    image_file_list = []
+    if os.path.isdir(image_sets_path): 
+        image_file_list = os.listdir(image_sets_path)
+    else:
+        image_file_list = [image_sets_path]
+
+    repo_ocr = is_highlight_or_prism(image_sets_path)
+    result = []
     if image_file_list is not None:
-        for index, image_file in enumerate(image_file_list):
+        for image_file in image_file_list:
             if os.path.isdir(image_sets_path):
-                image_path = os.path.join(image_sets_path, image_file) # Path to your image
+                image_path = os.path.join(image_sets_path, image_file)
             else:
                 image_path = image_file
             
@@ -1148,13 +1218,13 @@ def get_bug_scenarion_images(image_sets_path, args):
             
             if is_openai_compatible_model(args.base_model):
                 base64_image = encode_image(image_path) # Getting the Base64 string
-                image_file_list[index] = {
+                img_payload = {
                     "type": "image_url",
                     "image_url": {"url": f"data:image/{image_type};base64,{base64_image}"},
                 }
             elif is_claude_model(args.base_model):
                 base64_image = encode_image_claude(image_path)
-                image_file_list[index] = {
+                img_payload = {
                     "type": "image",
                     "source": {
                         "type": "base64",
@@ -1163,10 +1233,21 @@ def get_bug_scenarion_images(image_sets_path, args):
                     },
                 }
 
-    return image_file_list
+            result.append(img_payload)
 
+            if repo_ocr:
+                ocr_text = run_ocr(image_path)
+                OCR_PREFIX = (
+                    "The following text is extracted from the above image using OCR. "
+                )
+                if is_openai_compatible_model(args.base_model):
+                    ocr_payload = {"type": "text", "text": OCR_PREFIX + ocr_text}
+                elif is_claude_model(args.base_model):
+                    ocr_payload = {"type": "text", "text": OCR_PREFIX + ocr_text}            
+                result.append(ocr_payload)
 
-##################################################################################################
+    return result
+
 
 def compressing_javascript_file(bug_file_structure_dict, save_variable_declaration):
     """
@@ -1848,15 +1929,23 @@ def file_level_locating_val(instance_id, instance_repo_path, instance_info, args
                 output_dir=preprocess_output_dir
             )
 
+    image_input_dir = input_dir
+    if (
+        not skip_preprocess
+        and os.path.isdir(preprocess_output_dir)
+        and os.listdir(preprocess_output_dir)
+    ):
+        image_input_dir = preprocess_output_dir
+    logger.info(
+        f"Image input selection: repo={repo}, instance_id={instance_id}, "
+        f"image_input_dir={image_input_dir}"
+    )
+
     # get bug scenarion images
     try:
-        if skip_preprocess:
-            image_file_list = get_bug_scenarion_images(input_dir, args)
-        else:
-            image_file_list = get_bug_scenarion_images(preprocess_output_dir, args)
+        image_file_list = get_bug_scenarion_images(image_input_dir, args)
         if args.task == "val" and not image_file_list:
-            missing_input_dir = input_dir if skip_preprocess else preprocess_output_dir
-            raise RuntimeError(f"no valid image inputs in: {missing_input_dir}")
+            raise RuntimeError(f"no valid image inputs in: {image_input_dir}")
         # image_file_list = get_bug_scenarion_images(os.path.join(args.repo_path, args.dataset_split, instance_id.split('__')[0], instance_id, 'IMAGE'), args)
     except Exception as e:
         if args.task == "val":
@@ -2330,6 +2419,17 @@ Here's some documents maybe are useful to understand Web Components.
         bug_file_structure_dict = get_bug_file_structure_dict(file_path, repo_structure_dict)
         bug_files_with_context_dict[file_path][start_line-args.context_window-1:end_line+args.context_window] = bug_file_structure_dict['text'][start_line-args.context_window-1:end_line+args.context_window]
 
+    if not bug_files_with_context_dict:
+        logger.info(
+            "No class/function spans matched repo structure; "
+            "fallback to compressed key bug file content for patch generation."
+        )
+        for key in compressed_key_bug_files_dict.keys():
+            bug_file = compressed_key_bug_files_dict[key]["bug_file"]
+            compressed_content = compressed_key_bug_files_dict[key].get("compressed_bug_file_content", "")
+            if not compressed_content:
+                continue
+            bug_files_with_context_dict[bug_file] = compressed_content.splitlines()
 
     bug_files_with_context_dict = remove_blank_lines(bug_files_with_context_dict, blank_str='...', with_line_number=False)
     save_json_file(bug_files_with_context_dict_file, bug_files_with_context_dict)
@@ -2362,7 +2462,12 @@ Here's some documents maybe are useful to understand Web Components.
     if not skip_preprocess and os.path.isdir(input_dir) and os.listdir(input_dir) and os.path.isdir(preprocess_output_dir) and os.listdir(preprocess_output_dir):
         input_dir = preprocess_output_dir
 
-    should_ground = has_exactly_one_valid_image(input_dir)
+    skip_grounding = should_skip_grounding_for_repo(repo)
+    should_ground = (not skip_grounding) and has_exactly_one_valid_image(input_dir)
+    logger.info(
+        f"Grounding gate: repo={repo}, skip_grounding={skip_grounding}, "
+        f"input_dir={input_dir}, should_ground={should_ground}"
+    )
     if should_ground:
         ground_dir = os.path.join(args.output_dir, "ground_image")
         os.makedirs(ground_dir, exist_ok=True)
@@ -2516,6 +2621,8 @@ Here's some documents maybe are useful to understand Web Components.
             )
             save_json_file(patches_edits_dict_checked_file, patches_edits_dict)
 
+    patches_for_validation = patches_edits_dict
+
     if args.task == 'run': 
         selected_patch_file = os.path.join(args.output_dir, '5-3_selected_patch.json')
         if os.path.isfile(selected_patch_file):
@@ -2542,10 +2649,19 @@ Here's some documents maybe are useful to understand Web Components.
 
             token_usage_dict[selected_patch_file] = selected_token_usage
 
-        
+        patches_for_validation = selected_patch_dict_final
 
     # 6.1 - Patch Validation
-    plaus_patch_diff = patch_validation(selected_patch_dict_final, instance_repo_path, repo_structure_dict, logger, args)
+    plaus_patch_diff = patch_validation(
+        patches_for_validation,
+        instance_id,
+        instance_repo_path,
+        repo_structure_dict,
+        logger,
+        args,
+        problem_statement=problem_statement,
+        image_file_list=image_file_list,
+    )
 
     if args.task == 'run':
         if plaus_patch_diff != "":
@@ -2789,6 +2905,11 @@ def patch_validation(
             "repo_label": "markedjs/marked",
             "log_prefix": "markedjs",
         },
+        "react-pdf": {
+            "family": "reactpdf",
+            "repo_label": "diegomura/react-pdf",
+            "log_prefix": "reactpdf",
+        },
     }
 
     if (
@@ -2808,7 +2929,9 @@ def patch_validation(
         image_dir = os.path.join(args.output_dir, "IMAGE")
         clean_image_dir(image_dir, logger)
         baseline_png = os.path.join(image_dir, "0.png")
-        code_html_path = os.path.join(instance_repo_path, "code.html")
+        requires_code_html = highlighter_family in {"highlightjs", "chartjs", "markedjs", "prismjs"}
+        capture_html_file = "code.html" if requires_code_html else None
+        code_html_path = os.path.join(instance_repo_path, "code.html") if requires_code_html else ""
 
         if problem_statement is None:
             problem_statement = ""
@@ -2855,7 +2978,7 @@ def patch_validation(
                 args,
                 logger,
             )
-        else:
+        elif highlighter_family == "prismjs":
             code_html_path, code_html_token_usage = ensure_prism_code_html_for_val(
                 instance_id,
                 instance_repo_path,
@@ -2864,7 +2987,7 @@ def patch_validation(
                 args,
                 logger,
             )
-        if not os.path.isfile(code_html_path):
+        if requires_code_html and not os.path.isfile(code_html_path):
             logger.warning(f"code.html not found: {code_html_path}")
             return ""
 
@@ -2899,7 +3022,7 @@ def patch_validation(
                 instance_repo_path,
                 baseline_png,
                 logger,
-                html_file="code.html",
+                html_file=capture_html_file,
             )
             if not baseline_ok:
                 logger.warning(f"Failed to capture baseline screenshot after retries: {baseline_png}")
@@ -2908,8 +3031,8 @@ def patch_validation(
             "instance_id": instance_id,
             "records": [
                 {
-                    "html_file": "code.html",
-                    "generation_mode": "template_llm_or_local_fallback",
+                    "html_file": capture_html_file,
+                    "generation_mode": "template_llm_or_local_fallback" if requires_code_html else "not_required_runtime_capture",
                 }
             ]
         }
@@ -2960,7 +3083,10 @@ def patch_validation(
 
             if not patch_key or not patch_has_edits or not patch_is_matchable:
                 missing_reason = "missing patch key"
-                if patch_key and patch_has_edits and not patch_is_matchable:
+                if patch_key and not patch_has_edits:
+                    missing_reason = "empty patch edits"
+                    logger.info(f"{log_prefix} patch {patch_no}: patch key {patch_key} produced empty patch edits, skip.")
+                elif patch_key and patch_has_edits and not patch_is_matchable:
                     missing_reason = "search not found in repo"
                     logger.info(f"{log_prefix} patch {patch_no}: patch edits exist but SEARCH did not match repo, skip.")
                 else:
@@ -3052,7 +3178,12 @@ def patch_validation(
                     )
                     continue
 
-                if getattr(args, "instance_prebuild_done", False):
+                reuse_instance_prebuild = (
+                    getattr(args, "instance_prebuild_done", False)
+                    and should_reuse_instance_prebuild_result(instance_repo_path)
+                )
+
+                if reuse_instance_prebuild:
                     build_cmd = getattr(args, "instance_prebuild_cmd", "") or make_build_cmd(instance_repo_path)
                     build_response = "Success" if getattr(args, "instance_prebuild_ok", False) else "Fail"
                     build_result = ""
@@ -3098,7 +3229,7 @@ def patch_validation(
                     instance_repo_path,
                     patch_png,
                     logger,
-                    html_file="code.html",
+                    html_file=capture_html_file,
                 )
                 if not capture_ok:
                     check_png_from_baseline_or_placeholder(
@@ -3343,8 +3474,14 @@ def patch_validation(
             pass
         
         # repo build
+        reuse_instance_prebuild = False
         if args.patch_generation_samples >= 1 and args.task == 'val':
-            if getattr(args, "instance_prebuild_done", False):
+            reuse_instance_prebuild = (
+                getattr(args, "instance_prebuild_done", False)
+                and should_reuse_instance_prebuild_result(instance_repo_path)
+            )
+
+            if reuse_instance_prebuild:
                 build_cmd = getattr(args, "instance_prebuild_cmd", "") or make_build_cmd(instance_repo_path)
                 build_response = 'Success' if getattr(args, "instance_prebuild_ok", False) else 'Fail'
                 build_result = ''
@@ -3362,7 +3499,7 @@ def patch_validation(
             logger.info(f'Repo Build No Need. Only 1 Patch.')
 
         
-        if not getattr(args, "instance_prebuild_done", False):
+        if not reuse_instance_prebuild:
             logger.info(f'Wait {args.wait_time_after_build} S after REPO build/test...')
             time.sleep(int(args.wait_time_after_build))  # wait 20 seconds after fix
 

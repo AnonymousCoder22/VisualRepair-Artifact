@@ -4,6 +4,7 @@ import html as html_lib
 import re
 import subprocess
 import time
+from pathlib import Path
 
 from PIL import Image
 
@@ -22,37 +23,40 @@ Supported validation screenshot/runtime families in this repository revision:
 - highlight.js
 - Chart.js
 - marked.js
+- react-pdf
 """
 
 
 SCREENSHOT_TARGETS = (
     {
         "key": "prism",
-        "script": "prismjs_capture_from_bug_info.cjs",
         "mode_env": "GUIREPAIR_PRISM_SCREENSHOT_MODE",
         "mode_default": "playwright",
         "match": lambda repo_basename, instance_id: repo_basename == "prism",
     },
     {
         "key": "highlightjs",
-        "script": "highlightjs_capture_from_bug_info.cjs",
         "mode_env": "GUIREPAIR_HIGHLIGHTJS_SCREENSHOT_MODE",
         "mode_default": "playwright",
         "match": lambda repo_basename, instance_id: repo_basename == "highlight.js",
     },
     {
         "key": "chartjs",
-        "script": "chartjs_capture_from_bug_info.cjs",
         "mode_env": "GUIREPAIR_CHARTJS_SCREENSHOT_MODE",
         "mode_default": "playwright",
         "match": lambda repo_basename, instance_id: repo_basename == "Chart.js",
     },
     {
         "key": "markedjs",
-        "script": "markedjs_capture_from_bug_info.cjs",
         "mode_env": "GUIREPAIR_MARKEDJS_SCREENSHOT_MODE",
         "mode_default": "playwright",
         "match": lambda repo_basename, instance_id: repo_basename == "marked",
+    },
+    {
+        "key": "reactpdf",
+        "mode_env": "GUIREPAIR_REACTPDF_SCREENSHOT_MODE",
+        "mode_default": "",
+        "match": lambda repo_basename, instance_id: repo_basename == "react-pdf",
     },
 )
 
@@ -104,6 +108,40 @@ HIGHLIGHTJS_TEMPLATE1_INSTANCE_IDS = {
 
 def project_root_from_validation_dir() -> str:
     return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def project_root_path_from_validation_dir() -> Path:
+    return Path(project_root_from_validation_dir())
+
+
+def tools_screenshot_root_from_validation_dir() -> Path:
+    return project_root_path_from_validation_dir() / "Tools" / "screenshot"
+
+
+def resolve_validation_screenshot_script_path(repo_basename: str) -> str:
+    screenshot_root = tools_screenshot_root_from_validation_dir()
+    script_candidates = {
+        "prism": [
+            screenshot_root / "prismjs_capture_from_bug_info.cjs",
+        ],
+        "highlight.js": [
+            screenshot_root / "highlightjs_capture_from_bug_info.cjs",
+        ],
+        "Chart.js": [
+            screenshot_root / "chartjs_capture_from_bug_info.cjs",
+        ],
+        "marked": [
+            screenshot_root / "markedjs_capture_from_bug_info.cjs",
+        ],
+        "react-pdf": [
+            screenshot_root / "reactpdf_capture_from_bug_info.cjs",
+        ],
+    }
+
+    for candidate in script_candidates.get(repo_basename, []):
+        if candidate.is_file():
+            return str(candidate)
+    return ""
 
 
 def make_token_usage_record(args=None, *, base_model: str = "", skipped: bool = True) -> dict:
@@ -226,9 +264,8 @@ def check_capture_ui_screenshot(instance_id, instance_repo_path, output_png_path
     if not target:
         return False
 
-    project_root = project_root_from_validation_dir()
-    script_path = os.path.join(project_root, "Tools", "screenshot", target["script"])
-    if not os.path.isfile(script_path):
+    script_path = resolve_validation_screenshot_script_path(repo_basename)
+    if not script_path or not os.path.isfile(script_path):
         logger.warning(f"Screenshot script not found: {script_path}")
         return False
 
@@ -241,6 +278,8 @@ def check_capture_ui_screenshot(instance_id, instance_repo_path, output_png_path
         argv.extend(["--instance-id", str(instance_id)])
     if html_file:
         argv.extend(["--html", html_file])
+    if repo_basename == "react-pdf":
+        argv.append("--force-build")
 
     logger.info(f"Capture screenshot: {' '.join(argv)}")
     return run_screenshot(argv, output_png_path, logger)
@@ -361,15 +400,56 @@ def resolve_prism_code_template_path(logger) -> str:
     return ""
 
 
+def resolve_highlightjs_code_template_candidates(instance_id: str) -> list[str]:
+    template_root = tools_screenshot_root_from_validation_dir() / "code_template" / "highlightjs"
+    if str(instance_id or "") in HIGHLIGHTJS_TEMPLATE2_INSTANCE_IDS:
+        preferred_name = "template_highlightjs2.html"
+    else:
+        preferred_name = "template_highlightjs1.html"
+    return [
+        str(template_root / preferred_name),
+        str(template_root / "template_highlightjs1.html"),
+    ]
+
+
+def resolve_chartjs_code_template_candidates() -> list[str]:
+    return [
+        str(tools_screenshot_root_from_validation_dir() / "code_template" / "chartjs" / "template_chartjs.html"),
+    ]
+
+
 def extract_first_markdown_code_block(text: str):
-    if not text:
+    blocks = extract_markdown_code_blocks(text)
+    if not blocks:
         return "", ""
-    m = re.search(r"```(?P<lang>[^\n`]*)\n(?P<code>[\s\S]*?)```", text, flags=re.IGNORECASE)
-    if not m:
-        return "", ""
-    lang = (m.group("lang") or "").strip()
-    code = (m.group("code") or "").strip("\n")
-    return code, lang
+    return blocks[0]
+
+
+def extract_markdown_code_blocks(text: str, _depth: int = 0) -> list[tuple[str, str]]:
+    if not text or _depth > 2:
+        return []
+
+    block_re = re.compile(
+        r"(?ms)(?P<fence>`{3,})(?P<lang>[^\n`]*)\r?\n(?P<code>.*?)(?:\r?\n(?P=fence))"
+    )
+    blocks = []
+    seen = set()
+    for m in block_re.finditer(text):
+        lang = (m.group("lang") or "").strip()
+        code = (m.group("code") or "").strip("\n\r")
+        if code:
+            key = (code, lang)
+            if key not in seen:
+                seen.add(key)
+                blocks.append(key)
+            if "```" in code:
+                for nested_code, nested_lang in extract_markdown_code_blocks(code, _depth + 1):
+                    nested_key = (nested_code, nested_lang)
+                    if nested_key in seen:
+                        continue
+                    seen.add(nested_key)
+                    blocks.append(nested_key)
+    return blocks
 
 
 def parse_json_payload_from_text(text_payload):
@@ -677,6 +757,106 @@ def normalize_language_for_code_class(language: str) -> str:
     return lang or "plain"
 
 
+HIGHLIGHTJS_GENERIC_LANGUAGES = {"", "none", "plain", "plaintext", "text", "txt"}
+HIGHLIGHTJS_LANGUAGE_ALIASES = {
+    "none": "",
+    "plain": "",
+    "plaintext": "",
+    "text": "",
+    "txt": "",
+    "py": "python",
+    "js": "javascript",
+    "ts": "typescript",
+    "tsql": "sql",
+    "shell": "bash",
+    "sh": "bash",
+    "zsh": "bash",
+    "kt": "kotlin",
+}
+HIGHLIGHTJS_ISSUE_HEADER_RE = re.compile(r"^\(([^)]+)\)")
+HIGHLIGHTJS_WHICH_LANG_RE = re.compile(
+    r"\*\*Which language seems to have the issue\?\*\*\s*[\r\n]+([^\r\n]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def normalize_highlightjs_language(language: str) -> str:
+    lang = normalize_language_for_code_class(language)
+    if lang == "plain":
+        lang = ""
+    return HIGHLIGHTJS_LANGUAGE_ALIASES.get(lang, lang)
+
+
+def extract_highlightjs_language_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+
+    candidates = []
+    seen = set()
+    for pattern in (r"`([^`]+)`", r'"([^"]+)"', r"'([^']+)'"):
+        for match in re.finditer(pattern, text):
+            candidate = normalize_highlightjs_language(match.group(1))
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_+\-]*", text):
+        candidate = normalize_highlightjs_language(token)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
+def infer_highlightjs_language_from_problem_statement(problem_statement: str) -> str:
+    text = str(problem_statement or "").strip()
+    if not text:
+        return ""
+
+    header_match = HIGHLIGHTJS_ISSUE_HEADER_RE.match(text)
+    if header_match:
+        header_bits = [bit.strip() for bit in re.split(r"[,/]", header_match.group(1)) if bit.strip()]
+        for candidate in header_bits:
+            normalized = normalize_highlightjs_language(candidate)
+            if normalized:
+                return normalized
+
+    which_lang_match = HIGHLIGHTJS_WHICH_LANG_RE.search(text)
+    if which_lang_match:
+        for candidate in extract_highlightjs_language_candidates(which_lang_match.group(1)):
+            if candidate:
+                return candidate
+
+    return ""
+
+
+def select_highlightjs_problem_statement_code(problem_statement: str):
+    blocks = extract_markdown_code_blocks(problem_statement or "")
+    if not blocks:
+        return "", "", -1
+
+    inferred_language = infer_highlightjs_language_from_problem_statement(problem_statement)
+    for idx, (code_text, block_language) in enumerate(blocks):
+        code = (code_text or "").strip("\n\r")
+        if not code:
+            continue
+
+        lowered = code.lower()
+        if "<span" in lowered and "hljs-" in lowered:
+            continue
+        if "```" in code:
+            continue
+
+        language = normalize_highlightjs_language(block_language)
+        if not language:
+            language = inferred_language
+        return code, language, idx
+
+    return "", inferred_language, -1
+
+
 def rewrite_code_open_tag_language(code_open_tag: str, language: str) -> str:
     lang = normalize_language_for_code_class(language)
     class_re = re.compile(r'(\bclass\s*=\s*)(["\'])([^"\']*)(\2)', flags=re.IGNORECASE)
@@ -752,44 +932,27 @@ def ensure_prism_code_html_for_val(instance_id, instance_repo_path, problem_stat
 
 
 def resolve_highlightjs_code_template_path(instance_id, logger) -> str:
-    template_dir = os.path.join(
-        project_root_from_validation_dir(),
-        "Tools",
-        "screenshot",
-        "code_template",
-        "highlightjs",
-    )
-    if instance_id in HIGHLIGHTJS_TEMPLATE1_INSTANCE_IDS:
-        template_name = "template_highlightjs1.html"
-    elif instance_id in HIGHLIGHTJS_TEMPLATE2_INSTANCE_IDS:
-        template_name = "template_highlightjs2.html"
-    else:
-        template_name = "template_highlightjs1.html"
+    if instance_id not in HIGHLIGHTJS_TEMPLATE1_INSTANCE_IDS and instance_id not in HIGHLIGHTJS_TEMPLATE2_INSTANCE_IDS:
         logger.warning(
             f"Highlightjs instance_id not found in template mapping, fallback to template1: {instance_id}"
         )
 
-    template_path = os.path.normpath(os.path.join(template_dir, template_name))
-    if os.path.isfile(template_path):
-        return template_path
+    seen = set()
+    candidates = resolve_highlightjs_code_template_candidates(instance_id)
+    for candidate in candidates:
+        norm = os.path.normpath(candidate)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        if os.path.isfile(norm):
+            return norm
 
-    fallback_path = os.path.normpath(os.path.join(template_dir, "template_highlightjs1.html"))
-    logger.warning(
-        f"Selected highlightjs template missing: {template_path}; fallback={fallback_path}"
-    )
-    if os.path.isfile(fallback_path):
-        return fallback_path
-
-    logger.warning(
-        f"No highlightjs code.html template found in candidates: {[template_path, fallback_path]}"
-    )
+    logger.warning(f"No highlightjs code.html template found in candidates: {candidates}")
     return ""
 
 
 def resolve_chartjs_code_template_path(logger) -> str:
-    candidates = [
-        os.path.join(project_root_from_validation_dir(), "Tools", "screenshot", "code_template", "chartjs", "template_chartjs.html"),
-    ]
+    candidates = resolve_chartjs_code_template_candidates()
     seen = set()
     for p in candidates:
         norm = os.path.normpath(p)
@@ -834,17 +997,35 @@ def ensure_highlightjs_code_html_for_val(instance_id, instance_repo_path, proble
         logger.warning(f"Failed to read highlightjs template: {template_path}, error={e}")
         return code_html_path, token_usage
 
-    return write_code_html_with_llm_then_fallback(
-        instance_id,
-        code_html_path,
-        problem_statement,
-        image_file_list,
-        template_path,
-        template_html,
-        args,
-        logger,
-        replace_prism_code_block_html,
+    code_text, language, block_index = select_highlightjs_problem_statement_code(problem_statement)
+    source = "problem_statement_deterministic"
+    if not code_text:
+        llm_code_text, llm_language, llm_token_usage = extract_code_from_images_via_llm(
+            problem_statement,
+            image_file_list or [],
+            args,
+            logger,
+        )
+        token_usage = llm_token_usage
+        if llm_code_text:
+            code_text = llm_code_text
+            language = normalize_highlightjs_language(llm_language) or infer_highlightjs_language_from_problem_statement(problem_statement)
+            block_index = -1
+            source = "image_code_llm"
+
+    final_html = template_html
+    if code_text:
+        final_html = replace_prism_code_block_html(template_html, code_text, language, logger)
+    else:
+        logger.warning(f"Highlightjs could not derive code from problem_statement or image extraction: {instance_id}")
+
+    save_file(code_html_path, final_html)
+    logger.info(
+        f"Generated highlightjs code.html for {instance_id}: {code_html_path} "
+        f"(template={template_path}, source={source}, "
+        f"lang={language or 'plain'}, block_index={block_index}, code_len={len(code_text or '')})"
     )
+    return code_html_path, token_usage
 
 
 def replace_marked_input_html(base_html: str, markdown_text: str, language: str, logger) -> str:
@@ -857,7 +1038,37 @@ def normalize_chartjs_inline_script(code_text: str) -> str:
     text = str(code_text or "").strip()
     if not text:
         return ""
-    return text
+    fenced_code, _ = extract_first_markdown_code_block(text)
+    if fenced_code:
+        text = fenced_code.strip()
+
+    # Chart.js reproduce snippets sometimes use ESM imports even though the
+    # template loads the UMD bundle globally.
+    text = re.sub(
+        r"^\s*import\s+.+?\s+from\s+['\"]chart\.js(?:/auto)?['\"]\s*;?\s*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(
+        r"^\s*Chart\.register\(\s*\.\.\.\s*registerables\s*\)\s*;?\s*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+
+    # Reuse the template canvas/context regardless of the original element id.
+    text = re.sub(
+        r"document\.getElementById\(\s*['\"][^'\"]+['\"]\s*\)\.getContext\(\s*['\"]2d['\"]\s*\)",
+        "window.ctx",
+        text,
+    )
+    text = re.sub(
+        r"document\.getElementById\(\s*['\"][^'\"]+['\"]\s*\)",
+        "window.canvas",
+        text,
+    )
+    return text.strip()
 
 
 def replace_chartjs_inline_script_html(base_html: str, code_text: str, language: str, logger) -> str:
@@ -867,7 +1078,484 @@ def replace_chartjs_inline_script_html(base_html: str, code_text: str, language:
     normalized = normalize_chartjs_inline_script(code_text)
     if not normalized:
         return base_html
-    return replace_prism_code_block_html(base_html, normalized, language or "javascript", logger)
+
+    code_block_re = re.compile(
+        r"(?P<prefix><code\b[^>]*\bid=[\"']chart-config-source[\"'][^>]*>)(?P<body>[\s\S]*?)(?P<suffix></code>)",
+        flags=re.IGNORECASE,
+    )
+    m = code_block_re.search(base_html)
+    if not m:
+        logger.warning("Chart.js template has no #chart-config-source block; falling back to generic code replacement.")
+        return replace_prism_code_block_html(base_html, normalized, language or "javascript", logger)
+
+    new_prefix = m.group("prefix")
+    if language:
+        new_prefix = rewrite_code_open_tag_language(new_prefix, language)
+
+    escaped_code = html_lib.escape(normalized, quote=False)
+    return base_html[:m.start()] + new_prefix + escaped_code + m.group("suffix") + base_html[m.end():]
+
+
+def strip_leading_comment_prelude(text: str) -> str:
+    stripped = str(text or "")
+    while True:
+        updated = re.sub(r"^\s*/\*[\s\S]*?\*/\s*", "", stripped, count=1)
+        if updated != stripped:
+            stripped = updated
+            continue
+        updated = re.sub(r"^(?:\s*//[^\n]*\n)+\s*", "", stripped, count=1)
+        if updated != stripped:
+            stripped = updated
+            continue
+        break
+    return stripped.lstrip()
+
+
+def looks_like_html_markup(text: str) -> bool:
+    stripped = strip_leading_comment_prelude(text)
+    return stripped.startswith("<")
+
+
+def looks_like_html_document(text: str) -> bool:
+    stripped = strip_leading_comment_prelude(text)
+    return bool(re.search(r"<!DOCTYPE\s+html|<html\b", stripped, flags=re.IGNORECASE))
+
+
+def wrap_html_fragment(fragment: str) -> str:
+    body = str(fragment or "").strip()
+    if not body:
+        return ""
+    return (
+        "<!DOCTYPE html>\n"
+        "<html lang=\"en\">\n"
+        "<head>\n"
+        "  <meta charset=\"UTF-8\" />\n"
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />\n"
+        "</head>\n"
+        "<body>\n"
+        f"{body}\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+CHARTJS_RUNTIME_META_FILENAME = "chartjs_runtime_meta.json"
+
+
+def chartjs_instance_root_from_repo_path(instance_repo_path: str) -> str:
+    repo_path = os.path.normpath(instance_repo_path or "")
+    return os.path.dirname(os.path.dirname(repo_path))
+
+
+def load_chartjs_bug_info(instance_repo_path: str, logger) -> dict:
+    bug_info_path = os.path.join(chartjs_instance_root_from_repo_path(instance_repo_path), "bug_info.json")
+    if not check_nonempty_file(bug_info_path):
+        return {}
+    try:
+        payload = json.loads(read_file(bug_info_path))
+        return payload if isinstance(payload, dict) else {}
+    except Exception as e:
+        logger.warning(f"Failed to read Chart.js bug_info.json from {bug_info_path}: {e}")
+        return {}
+
+
+def load_chartjs_original_image_info(instance_repo_path: str, logger) -> dict:
+    image_dir = os.path.join(chartjs_instance_root_from_repo_path(instance_repo_path), "IMAGE")
+    if not os.path.isdir(image_dir):
+        return {}
+
+    for file_name in sorted(os.listdir(image_dir)):
+        lower_name = file_name.lower()
+        if not lower_name.endswith(".png"):
+            continue
+        image_path = os.path.join(image_dir, file_name)
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+            return {
+                "path": image_path,
+                "width": int(width),
+                "height": int(height),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to inspect Chart.js original image {image_path}: {e}")
+    return {}
+
+
+def clamp_int(value, lower: int, upper: int) -> int:
+    try:
+        parsed = int(round(float(value)))
+    except Exception:
+        parsed = lower
+    return max(lower, min(upper, parsed))
+
+
+def parse_chart_count_from_text(text: str) -> int:
+    if not text:
+        return 0
+    m = re.search(r"(\d+)\s+charts?\b", text, flags=re.IGNORECASE)
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+def looks_like_chartjs_config_object(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if "type" not in lowered or "data" not in lowered:
+        return False
+    return any(token in lowered for token in ("datasets", "labels", "options", "scales"))
+
+
+def extract_balanced_brace_block(text: str, start_index: int) -> str:
+    if not text or start_index < 0 or start_index >= len(text) or text[start_index] != "{":
+        return ""
+
+    depth = 0
+    in_string = ""
+    escape = False
+
+    for idx in range(start_index, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == in_string:
+                in_string = ""
+            continue
+
+        if ch in ("'", '"', "`"):
+            in_string = ch
+            continue
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start_index:idx + 1]
+    return ""
+
+
+def extract_chartjs_config_object(code_text: str) -> str:
+    text = strip_leading_comment_prelude(code_text).strip()
+    if not text:
+        return ""
+
+    if text.startswith("{"):
+        candidate = extract_balanced_brace_block(text, 0)
+        if looks_like_chartjs_config_object(candidate):
+            return candidate.strip()
+
+    assignment_patterns = [
+        r"(?:const|let|var)\s+\w+\s*=\s*",
+        r"\b\w+\s*=\s*",
+    ]
+    for pattern in assignment_patterns:
+        for m in re.finditer(pattern, text):
+            brace_index = text.find("{", m.end())
+            if brace_index < 0:
+                continue
+            candidate = extract_balanced_brace_block(text, brace_index)
+            if looks_like_chartjs_config_object(candidate):
+                return candidate.strip()
+
+    chart_index = text.find("new Chart")
+    if chart_index >= 0:
+        brace_index = text.find("{", chart_index)
+        if brace_index >= 0:
+            candidate = extract_balanced_brace_block(text, brace_index)
+            if looks_like_chartjs_config_object(candidate):
+                return candidate.strip()
+
+    return ""
+
+
+def pick_chartjs_issue_config(problem_statement: str, hints_text: str) -> str:
+    best_code = ""
+    best_score = -1
+
+    for source_name, raw_text in (
+        ("problem_statement", problem_statement or ""),
+        ("hints_text", hints_text or ""),
+    ):
+        for code_block, language in extract_markdown_code_blocks(raw_text):
+            candidate = extract_chartjs_config_object(code_block)
+            if not candidate:
+                continue
+
+            lowered = candidate.lower()
+            score = len(candidate)
+            if source_name == "problem_statement":
+                score += 300
+            if "datasets" in lowered:
+                score += 200
+            if "options" in lowered:
+                score += 150
+            if "responsive" in lowered:
+                score += 80
+            if "legend" in lowered:
+                score += 60
+            if "title" in lowered:
+                score += 60
+            if language.strip().lower() in {"", "js", "javascript", "json"}:
+                score += 20
+
+            if score > best_score:
+                best_score = score
+                best_code = candidate.strip()
+
+    return best_code
+
+
+def build_chartjs_runtime_meta(problem_statement: str, hints_text: str, original_image_info: dict) -> dict:
+    full_text = "\n".join([
+        str(problem_statement or ""),
+        str(hints_text or ""),
+    ])
+    lowered = full_text.lower()
+
+    base_width = clamp_int(original_image_info.get("width") or 1200, 320, 1600)
+    base_height = clamp_int(original_image_info.get("height") or 800, 160, 1400)
+    orig_width = clamp_int(base_width * 2, 640, 3200)
+    orig_height = clamp_int(base_height * 2, 320, 2800)
+
+    duplicate_render = (
+        any(token in lowered for token in ("rendered twice", "legend and title again", "title and legend are twice"))
+        or (
+            "legend" in lowered
+            and "title" in lowered
+            and any(token in lowered for token in ("twice", "multiple", "again", "redraw"))
+        )
+    )
+    dynamic_stress = duplicate_render or any(
+        token in lowered
+        for token in (
+            "responsive",
+            "resize",
+            "redraw",
+            "browser is under load",
+            "browser under load",
+            "timing problem",
+            "rendering process takes longer",
+            "update from a timer",
+        )
+    )
+
+    chart_count = parse_chart_count_from_text(full_text)
+    if dynamic_stress:
+        replicate_count = clamp_int(chart_count or 8, 1, 24)
+    else:
+        replicate_count = 1
+
+    if dynamic_stress and base_width >= 640 and base_height >= 520:
+        visible_chart_count = min(4, replicate_count)
+    elif dynamic_stress and base_width >= 520 and base_height >= 320:
+        visible_chart_count = min(2, replicate_count)
+    else:
+        visible_chart_count = 1
+
+    visible_columns = 2 if visible_chart_count >= 2 else 1
+    visible_rows = max(1, (visible_chart_count + visible_columns - 1) // visible_columns)
+    page_padding = 12 if orig_width < 520 else 16
+    card_gap = 14 if visible_chart_count >= 2 else 0
+
+    available_width = max(200, orig_width - (page_padding * 2) - (card_gap * max(0, visible_columns - 1)))
+    card_width = max(180, available_width // visible_columns)
+    available_height = max(140, orig_height - (page_padding * 2) - (card_gap * max(0, visible_rows - 1)))
+    per_row_height = max(140, available_height // visible_rows)
+    header_height = 64 if visible_chart_count > 1 else 24
+    chart_height = max(100, per_row_height - header_height)
+
+    resize_sequence = []
+    internal_resize_pulses = []
+    if dynamic_stress:
+        shrink_width = clamp_int(orig_width - max(24, orig_width // 9), 640, 3200)
+        grow_width = clamp_int(orig_width + max(18, orig_width // 12), 640, 3200)
+        grow_height = clamp_int(orig_height + max(18, orig_height // 10), 320, 2800)
+        resize_sequence = [
+            {"width": shrink_width, "height": orig_height, "wait_ms": 120},
+            {"width": grow_width, "height": grow_height, "wait_ms": 150},
+            {"width": orig_width, "height": orig_height, "wait_ms": 180},
+        ]
+        internal_resize_pulses = [
+            {"width": clamp_int(orig_width - max(18, orig_width // 12), 640, 3200), "height": orig_height, "wait_ms": 90},
+            {"width": clamp_int(orig_width + max(12, orig_width // 16), 640, 3200), "height": orig_height, "wait_ms": 120},
+        ]
+
+    return {
+        "viewport_width": orig_width,
+        "viewport_height": orig_height,
+        "page_padding": page_padding,
+        "card_gap": card_gap,
+        "card_width": card_width,
+        "chart_height": chart_height,
+        "visible_chart_count": visible_chart_count,
+        "visible_columns": visible_columns,
+        "replicate_count": replicate_count,
+        "dynamic_stress": dynamic_stress,
+        "issue_kind": "responsive_duplicate_render" if duplicate_render else ("dynamic_stress" if dynamic_stress else "static"),
+        "prefer_issue_config": bool(dynamic_stress),
+        "dashboard_variants": bool(duplicate_render and visible_chart_count >= 4),
+        "show_card_headers": bool(visible_chart_count > 1),
+        "page_background": "#f2f2f2" if visible_chart_count > 1 else "#ffffff",
+        "card_background": "#ffffff",
+        "card_shadow": "0 1px 4px rgba(0, 0, 0, 0.18)" if visible_chart_count > 1 else "none",
+        "wait_after_ms": 1200 if dynamic_stress else 350,
+        "ready_timeout_ms": 7000 if dynamic_stress else 2500,
+        "ready_flag": "__GUIREPAIR_CHARTJS_READY__",
+        "resize_sequence": resize_sequence,
+        "internal_resize_pulses": internal_resize_pulses,
+        "original_image_path": str(original_image_info.get("path") or ""),
+    }
+
+
+def inject_chartjs_runtime_meta_html(html_text: str, runtime_meta: dict) -> str:
+    if not html_text:
+        return html_text
+    if "window.__GUIREPAIR_CHARTJS_META__ =" in html_text:
+        return html_text
+
+    payload = json.dumps(runtime_meta or {}, ensure_ascii=False, sort_keys=True).replace("</", "<\\/")
+    script_tag = f"<script>window.__GUIREPAIR_CHARTJS_META__ = {payload};</script>"
+
+    head_close = re.search(r"</head>", html_text, flags=re.IGNORECASE)
+    if head_close:
+        return html_text[:head_close.start()] + script_tag + "\n" + html_text[head_close.start():]
+
+    body_open = re.search(r"<body\b[^>]*>", html_text, flags=re.IGNORECASE)
+    if body_open:
+        return html_text[:body_open.end()] + "\n" + script_tag + html_text[body_open.end():]
+
+    return script_tag + "\n" + html_text
+
+
+def write_chartjs_runtime_meta_file(instance_repo_path: str, runtime_meta: dict, logger) -> str:
+    runtime_meta_path = os.path.join(instance_repo_path, CHARTJS_RUNTIME_META_FILENAME)
+    try:
+        save_file(runtime_meta_path, json.dumps(runtime_meta or {}, ensure_ascii=False, indent=2, sort_keys=True))
+    except Exception as e:
+        logger.warning(f"Failed to write Chart.js runtime meta {runtime_meta_path}: {e}")
+        return ""
+    return runtime_meta_path
+
+
+def load_chartjs_reproduce_code(instance_id, args, logger):
+    candidates = []
+
+    output_dir = getattr(args, "output_dir", "")
+    if output_dir:
+        candidates.extend([
+            ("output_txt", os.path.join(output_dir, "1-1-5_reproduce_code.txt")),
+            ("output_json", os.path.join(output_dir, "1-1-5_reproduce_code.json")),
+        ])
+
+    repo_root = getattr(args, "repo_path", "")
+    dataset_split = getattr(args, "dataset_split", "")
+    if repo_root and dataset_split and instance_id:
+        instance_root = os.path.join(repo_root, dataset_split, instance_id.split("__")[0], instance_id)
+        candidates.append(("bug_txt", os.path.join(instance_root, "BUG", "reproduce_code.txt")))
+
+    for source_name, path in candidates:
+        if not check_nonempty_file(path):
+            continue
+        try:
+            if path.endswith(".json"):
+                payload = json.loads(read_file(path))
+                if isinstance(payload, dict) and payload:
+                    first_key = next(iter(payload))
+                    first_value = payload.get(first_key)
+                    if isinstance(first_value, dict):
+                        code_text = str(first_value.get("reproduce_code", "")).strip()
+                    else:
+                        code_text = ""
+                else:
+                    code_text = ""
+            else:
+                code_text = read_file(path).strip()
+        except Exception as e:
+            logger.warning(f"Failed to read Chart.js reproduce code from {path}: {e}")
+            continue
+
+        if code_text:
+            return code_text, f"reproduce_code:{source_name}"
+
+    return "", ""
+
+
+def build_chartjs_code_html_from_reproduce_or_fallback(
+    instance_id,
+    instance_repo_path,
+    problem_statement,
+    image_file_list,
+    template_html,
+    args,
+    logger,
+):
+    token_usage = make_token_usage_record(args, skipped=True)
+    bug_info = load_chartjs_bug_info(instance_repo_path, logger)
+    hints_text = str(bug_info.get("hints_text", "") or "")
+    original_image_info = load_chartjs_original_image_info(instance_repo_path, logger)
+    runtime_meta = build_chartjs_runtime_meta(problem_statement, hints_text, original_image_info)
+    issue_config = pick_chartjs_issue_config(problem_statement, hints_text)
+
+    reproduce_code, reproduce_source = load_chartjs_reproduce_code(instance_id, args, logger)
+    if runtime_meta.get("prefer_issue_config") and issue_config:
+        final_html = replace_chartjs_inline_script_html(
+            template_html,
+            issue_config,
+            "javascript",
+            logger,
+        )
+        final_html = inject_chartjs_runtime_meta_html(final_html, runtime_meta)
+        return final_html, token_usage, "issue_config_harness", len(issue_config), runtime_meta
+
+    if reproduce_code:
+        raw_code = str(reproduce_code or "")
+        if looks_like_html_markup(raw_code):
+            html_code = strip_leading_comment_prelude(raw_code)
+            final_html = sanitize_generated_html_text(html_code, logger) or html_code
+            if final_html and not looks_like_html_document(final_html):
+                final_html = wrap_html_fragment(final_html)
+            final_html = inject_chartjs_runtime_meta_html(final_html, runtime_meta)
+            return final_html, token_usage, reproduce_source, len(html_code), runtime_meta
+
+        normalized = normalize_chartjs_inline_script(raw_code)
+        final_html = replace_chartjs_inline_script_html(
+            template_html,
+            normalized,
+            "javascript",
+            logger,
+        )
+        final_html = inject_chartjs_runtime_meta_html(final_html, runtime_meta)
+        return final_html, token_usage, reproduce_source, len(normalized), runtime_meta
+
+    if issue_config:
+        final_html = replace_chartjs_inline_script_html(
+            template_html,
+            issue_config,
+            "javascript",
+            logger,
+        )
+        final_html = inject_chartjs_runtime_meta_html(final_html, runtime_meta)
+        return final_html, token_usage, "issue_config_fallback", len(issue_config), runtime_meta
+
+    final_html, token_usage, source, code_len = build_code_html_locally_from_template(
+        problem_statement,
+        image_file_list,
+        template_html,
+        args,
+        logger,
+        replace_chartjs_inline_script_html,
+    )
+    final_html = inject_chartjs_runtime_meta_html(final_html, runtime_meta)
+    return final_html, token_usage, source, code_len, runtime_meta
 
 
 def ensure_markedjs_code_html_for_val(instance_id, instance_repo_path, problem_statement, image_file_list, args, logger):
@@ -899,7 +1587,15 @@ def ensure_markedjs_code_html_for_val(instance_id, instance_repo_path, problem_s
     )
 
 
-def ensure_chartjs_code_html_for_val(instance_id, instance_repo_path, problem_statement, image_file_list, args, logger):
+def ensure_chartjs_code_html_for_val(
+    instance_id,
+    instance_repo_path,
+    problem_statement,
+    image_file_list,
+    args,
+    logger,
+    return_metadata: bool = False,
+):
     code_html_path = os.path.join(instance_repo_path, "code.html")
     token_usage = make_token_usage_record(args, skipped=True)
     if os.path.isfile(code_html_path):
@@ -907,25 +1603,44 @@ def ensure_chartjs_code_html_for_val(instance_id, instance_repo_path, problem_st
 
     template_path = resolve_chartjs_code_template_path(logger)
     if not template_path:
+        if return_metadata:
+            return code_html_path, token_usage, {"source": "", "code_len": 0, "template_path": ""}
         return code_html_path, token_usage
 
     try:
         template_html = read_file(template_path)
     except Exception as e:
         logger.warning(f"Failed to read chartjs template: {template_path}, error={e}")
+        if return_metadata:
+            return code_html_path, token_usage, {"source": "", "code_len": 0, "template_path": template_path}
         return code_html_path, token_usage
 
-    return write_code_html_with_llm_then_fallback(
+    final_html, token_usage, source, code_len, runtime_meta = build_chartjs_code_html_from_reproduce_or_fallback(
         instance_id,
-        code_html_path,
+        instance_repo_path,
         problem_statement,
         image_file_list,
-        template_path,
         template_html,
         args,
         logger,
-        replace_chartjs_inline_script_html,
     )
+    save_file(code_html_path, final_html)
+    runtime_meta_path = write_chartjs_runtime_meta_file(instance_repo_path, runtime_meta, logger)
+    logger.info(
+        f"Generated code.html for {instance_id}: {code_html_path} "
+        f"(template={template_path}, code_source={source}, code_len={code_len}, "
+        f"viewport={runtime_meta.get('viewport_width')}x{runtime_meta.get('viewport_height')}, "
+        f"issue_kind={runtime_meta.get('issue_kind')})"
+    )
+    if return_metadata:
+        return code_html_path, token_usage, {
+            "source": source,
+            "code_len": code_len,
+            "template_path": template_path,
+            "runtime_meta_path": runtime_meta_path,
+            "runtime_meta": runtime_meta,
+        }
+    return code_html_path, token_usage
 
 
 def norm_rel_path(p: str) -> str:

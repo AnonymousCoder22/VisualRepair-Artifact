@@ -3,8 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const url = require('url');
-const { spawnSync } = require('child_process');
 const os = require('os');
+const { spawnSync } = require('child_process');
+const { parseArgs } = require('./common/capture_common.cjs');
+
+const DEFAULT_VIEWPORT = { width: 2400, height: 1600 };
 
 const HIGHLIGHTJS_TEMPLATE2_INSTANCE_IDS = new Set([
   'highlightjs__highlight.js-2684',
@@ -51,55 +54,19 @@ const HIGHLIGHTJS_TEMPLATE1_INSTANCE_IDS = new Set([
   'highlightjs__highlight.js-3644'
 ]);
 
-function parseArgs(argv) {
-  const args = {};
-  for (let i = 2; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next && !next.startsWith('--')) {
-        args[key] = next;
-        i++;
-      } else {
-        args[key] = 'true';
-      }
-    }
-  }
-  return args;
+function die(message, extra = {}) {
+  const err = new Error(message);
+  Object.assign(err, extra);
+  throw err;
 }
 
-function die(msg) {
-  console.error(`ERROR: ${msg}`);
-  process.exit(1);
+function ensureDir(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
 }
 
-function ensureDir(p) {
-  fs.mkdirSync(p, { recursive: true });
-}
-
-function normalizeMode(modeRaw) {
-  const mode = String(modeRaw || '').trim().toLowerCase();
-  if (!mode || mode === 'auto') return 'auto';
-  if (mode === 'playwright' || mode === 'pw') return 'playwright';
-  if (mode === 'chromium' || mode === 'chrome' || mode === 'edge') return 'chromium';
-  if (mode === 'browsergui' || mode === 'gui' || mode === 'window') return 'chromium';
-  return 'auto';
-}
-
-function defaultHighlightTemplatePath(instanceId) {
-  let templateName = 'template_highlightjs1.html';
-  if (HIGHLIGHTJS_TEMPLATE2_INSTANCE_IDS.has(instanceId)) {
-    templateName = 'template_highlightjs2.html';
-  } else if (!HIGHLIGHTJS_TEMPLATE1_INSTANCE_IDS.has(instanceId)) {
-    console.warn(`[highlightjs-screenshot] instance_id not mapped, fallback to template1: ${instanceId || ''}`);
-  }
-  return path.resolve(__dirname, 'code_template', 'highlightjs', templateName);
-}
-
-function contentTypeFor(p) {
-  const ext = path.extname(p).toLowerCase();
-  if (ext === '.js') return 'text/javascript; charset=utf-8';
+function contentTypeFor(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') return 'text/javascript; charset=utf-8';
   if (ext === '.css') return 'text/css; charset=utf-8';
   if (ext === '.svg') return 'image/svg+xml';
   if (ext === '.png') return 'image/png';
@@ -108,6 +75,8 @@ function contentTypeFor(p) {
   if (ext === '.woff2') return 'font/woff2';
   if (ext === '.ttf') return 'font/ttf';
   if (ext === '.html') return 'text/html; charset=utf-8';
+  if (ext === '.json') return 'application/json; charset=utf-8';
+  if (ext === '.map') return 'application/json; charset=utf-8';
   return 'application/octet-stream';
 }
 
@@ -126,51 +95,107 @@ function staticFile(res, filePath, contentType) {
     if (!st.isFile()) {
       res.writeHead(404);
       res.end('not found');
-      return;
+      return false;
     }
-    res.writeHead(200, { 'Content-Type': contentType });
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Connection': 'close',
+    });
     fs.createReadStream(filePath).pipe(res);
+    return true;
   } catch (err) {
     res.writeHead(404);
     res.end('not found');
+    return false;
   }
 }
 
-function findBrowserExecutable(explicitPath) {
-  if (explicitPath) {
-    const p = path.resolve(explicitPath);
-    if (fs.existsSync(p)) return p;
-  }
-
-  const envCandidates = [
-    process.env.GUIREPAIR_CHROME,
-    process.env.CHROME_PATH,
-    process.env.PUPPETEER_EXECUTABLE_PATH
-  ].filter(Boolean);
-  for (const p of envCandidates) {
+function serveFromRoots(res, reqPath, roots) {
+  for (const root of roots) {
+    const fullPath = safeJoin(root, reqPath);
+    if (!fullPath) continue;
     try {
-      const abs = path.resolve(p);
-      if (fs.existsSync(abs)) return abs;
-      if (commandExists(p)) return p;
+      if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+        return staticFile(res, fullPath, contentTypeFor(fullPath));
+      }
     } catch (err) {}
   }
+  res.writeHead(404);
+  res.end('not found');
+  return false;
+}
 
-  const absoluteCandidates = process.platform === 'darwin'
-    ? [
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'
-      ]
-    : [];
-  for (const p of absoluteCandidates) {
-    if (fs.existsSync(p)) return p;
+function defaultHighlightTemplatePath(instanceId) {
+  let templateName = 'template_highlightjs1.html';
+  if (HIGHLIGHTJS_TEMPLATE2_INSTANCE_IDS.has(instanceId)) {
+    templateName = 'template_highlightjs2.html';
+  } else if (!HIGHLIGHTJS_TEMPLATE1_INSTANCE_IDS.has(instanceId)) {
+    console.warn(`[highlightjs-strict] instance_id not mapped, fallback to template1: ${instanceId || ''}`);
+  }
+  return path.resolve(__dirname, 'code_template', 'highlightjs', templateName);
+}
+
+function resolveHtmlPath(repoDir, htmlArg) {
+  if (!htmlArg) {
+    return path.join(repoDir, 'code.html');
+  }
+  if (path.isAbsolute(htmlArg)) {
+    return path.resolve(htmlArg);
+  }
+  return path.join(repoDir, htmlArg);
+}
+
+function ensureHtmlFile(repoDir, htmlArg, instanceId, forceTemplate) {
+  const htmlPath = resolveHtmlPath(repoDir, htmlArg);
+  const templatePath = defaultHighlightTemplatePath(instanceId);
+  if (forceTemplate || !fs.existsSync(htmlPath)) {
+    ensureDir(path.dirname(htmlPath));
+    fs.copyFileSync(templatePath, htmlPath);
+  }
+  if (!fs.existsSync(htmlPath)) {
+    die(`html file not found: ${htmlPath}`);
+  }
+  return { htmlPath, templatePath };
+}
+
+function runBuildCommand(repoDir, buildCmd) {
+  if (!buildCmd) {
+    return { cmd: '', skipped: true, status: 0, stdout: '', stderr: '' };
   }
 
-  const pathCandidates = ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable', 'chrome', 'msedge'];
-  for (const candidate of pathCandidates) {
-    if (commandExists(candidate)) return candidate;
-  }
+  const result = spawnSync(buildCmd, {
+    cwd: repoDir,
+    shell: true,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    env: process.env,
+  });
 
-  return 'chromium';
+  return {
+    cmd: buildCmd,
+    skipped: false,
+    status: typeof result.status === 'number' ? result.status : 1,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+    error: result.error ? String(result.error) : '',
+  };
+}
+
+function assertBuildArtifacts(repoDir) {
+  const required = [
+    path.join(repoDir, 'build', 'highlight.js'),
+    path.join(repoDir, 'build', 'demo', 'styles', 'rainbow.css'),
+  ];
+  const missing = required.filter((filePath) => !fs.existsSync(filePath));
+  if (missing.length > 0) {
+    die('required build artifacts are missing', { missingArtifacts: missing });
+  }
+  return required;
+}
+
+function diagnosticsPathFor(outPath, explicitPath) {
+  if (explicitPath) return path.resolve(explicitPath);
+  return `${outPath}.diagnostics.json`;
 }
 
 function commandExists(command) {
@@ -179,12 +204,204 @@ function commandExists(command) {
   return res.status === 0;
 }
 
-function tryChromiumScreenshot(browserExe, pageUrl, outPath, viewport) {
-  const [vw, vh] = viewport;
-  const tmpBase = fs.existsSync(path.dirname(outPath)) ? path.dirname(outPath) : os.tmpdir();
-  const userDataDir = fs.mkdtempSync(path.join(tmpBase, 'guirepair-highlightjs-profile-'));
+function findBrowserExecutable(explicitPath) {
+  if (explicitPath) {
+    const candidate = path.resolve(explicitPath);
+    if (fs.existsSync(candidate)) return candidate;
+  }
 
-  const args = [
+  const envCandidates = [
+    process.env.GUIREPAIR_CHROME,
+    process.env.CHROME_PATH,
+    process.env.PUPPETEER_EXECUTABLE_PATH,
+  ].filter(Boolean);
+
+  for (const candidate of envCandidates) {
+    try {
+      const abs = path.resolve(candidate);
+      if (fs.existsSync(abs)) return abs;
+      if (commandExists(candidate)) return candidate;
+    } catch (err) {}
+  }
+
+  const absoluteCandidates = process.platform === 'darwin'
+    ? [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      ]
+    : [];
+
+  for (const candidate of absoluteCandidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  const pathCandidates = ['chromium', 'chromium-browser', 'google-chrome', 'google-chrome-stable', 'chrome', 'msedge'];
+  for (const candidate of pathCandidates) {
+    if (commandExists(candidate)) return candidate;
+  }
+
+  return '';
+}
+
+function stripHtmlText(htmlText) {
+  return String(htmlText || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildPageStateFromHtml(htmlText) {
+  const html = String(htmlText || '');
+  return {
+    title: '',
+    readyState: 'complete',
+    codeBlockCount: (html.match(/<code\b/gi) || []).length,
+    preBlockCount: (html.match(/<pre\b/gi) || []).length,
+    spanCounts: [],
+    totalSpanCount: (html.match(/<span\b/gi) || []).length,
+    textLengths: [],
+    totalTextLength: stripHtmlText(html).length,
+    classNames: [],
+    bodyTextLength: stripHtmlText(html).length,
+  };
+}
+
+function collectNoHighlightWarnings(consoleEntries) {
+  return (consoleEntries || [])
+    .filter((entry) => /Could not find the language|Falling back to no-highlight mode/i.test(entry.text || ''))
+    .map((entry) => entry.text || '');
+}
+
+function hasExpectedCodeContent(pageState) {
+  if (!pageState) return false;
+  if ((pageState.preBlockCount || 0) < 1) return false;
+  return (pageState.totalTextLength || 0) > 0;
+}
+
+async function captureWithPlaywright(pageUrl, outPath, diagnostics, viewport, timeoutMs, waitAfterLoadMs) {
+  let playwright = null;
+  try {
+    playwright = require('playwright');
+  } catch (err) {
+    die('playwright is not installed');
+  }
+
+  const browser = await playwright.chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-dev-shm-usage'],
+  });
+
+  const page = await browser.newPage({ viewport });
+  page.on('console', (msg) => {
+    diagnostics.console.push({
+      type: msg.type(),
+      text: msg.text(),
+    });
+  });
+  page.on('pageerror', (err) => {
+    diagnostics.pageErrors.push(String(err && err.stack ? err.stack : err));
+  });
+  page.on('requestfailed', (request) => {
+    diagnostics.requestFailures.push({
+      url: request.url(),
+      method: request.method(),
+      failure: request.failure() ? request.failure().errorText : 'request failed',
+    });
+  });
+  page.on('response', (response) => {
+    if (response.status() >= 400) {
+      diagnostics.httpFailures.push({
+        url: response.url(),
+        status: response.status(),
+      });
+    }
+  });
+
+  try {
+    await page.goto(pageUrl, { waitUntil: 'load', timeout: timeoutMs });
+    try {
+      await page.waitForLoadState('networkidle', { timeout: Math.min(timeoutMs, 5000) });
+    } catch (err) {}
+
+    await page.waitForFunction(
+      () => typeof window !== 'undefined' && typeof window.hljs !== 'undefined',
+      { timeout: timeoutMs }
+    );
+
+    await page.waitForFunction(
+      () => document.querySelectorAll('pre code').length > 0,
+      { timeout: timeoutMs }
+    );
+
+    if (waitAfterLoadMs > 0) {
+      await page.waitForTimeout(waitAfterLoadMs);
+    }
+
+    diagnostics.pageState = await page.evaluate(() => {
+      const codeBlocks = Array.from(document.querySelectorAll('pre code'));
+      const spanCounts = codeBlocks.map((node) => node.querySelectorAll('span').length);
+      const textLengths = codeBlocks.map((node) => (node.innerText || '').length);
+      const classNames = codeBlocks.map((node) => node.className || '');
+      const preBlocks = Array.from(document.querySelectorAll('pre'));
+      return {
+        title: document.title || '',
+        readyState: document.readyState,
+        codeBlockCount: codeBlocks.length,
+        preBlockCount: preBlocks.length,
+        spanCounts,
+        totalSpanCount: spanCounts.reduce((sum, value) => sum + value, 0),
+        textLengths,
+        totalTextLength: textLengths.reduce((sum, value) => sum + value, 0),
+        classNames,
+        bodyTextLength: (document.body && document.body.innerText ? document.body.innerText.length : 0),
+      };
+    });
+    diagnostics.noHighlightWarnings = collectNoHighlightWarnings(diagnostics.console);
+
+    if (diagnostics.pageErrors.length > 0) {
+      die('page errors detected during capture');
+    }
+    if (diagnostics.requestFailures.length > 0) {
+      die('network request failures detected during capture');
+    }
+    if (diagnostics.httpFailures.length > 0) {
+      die('http failures detected during capture');
+    }
+    if ((diagnostics.noHighlightWarnings || []).length > 0) {
+      die('highlight.js fell back to no-highlight mode');
+    }
+    if (!hasExpectedCodeContent(diagnostics.pageState)) {
+      die('page rendered without the expected code content');
+    }
+
+    await page.screenshot({ path: outPath });
+    diagnostics.success = true;
+  } catch (err) {
+    diagnostics.success = false;
+    diagnostics.error = String(err && err.stack ? err.stack : err);
+    try {
+      diagnostics.pageHtml = await page.content();
+    } catch (snapshotErr) {
+      diagnostics.pageHtml = `<failed to capture page html: ${String(snapshotErr)}>`;
+    }
+    throw err;
+  } finally {
+    await browser.close();
+  }
+}
+
+function captureWithChromiumCli(browserExe, pageUrl, outPath, diagnostics, viewport, fallbackHtmlText = '') {
+  diagnostics.pageHtml = String(fallbackHtmlText || '');
+  diagnostics.pageState = buildPageStateFromHtml(diagnostics.pageHtml);
+  if (!hasExpectedCodeContent(diagnostics.pageState)) {
+    die('html source does not contain the expected code content');
+  }
+
+  const tmpBase = fs.existsSync(path.dirname(outPath)) ? path.dirname(outPath) : os.tmpdir();
+  const userDataDir = fs.mkdtempSync(path.join(tmpBase, 'highlightjs-capture-profile-'));
+  const baseArgs = [
     '--headless',
     '--disable-gpu',
     '--hide-scrollbars',
@@ -196,166 +413,153 @@ function tryChromiumScreenshot(browserExe, pageUrl, outPath, viewport) {
     '--disable-crash-reporter',
     '--remote-debugging-port=0',
     `--user-data-dir=${userDataDir}`,
-    `--window-size=${vw},${vh}`,
-    // Give the page a small amount of time to execute scripts (Prism.highlightAll()).
-    '--virtual-time-budget=2000',
-    `--screenshot=${outPath}`,
-    pageUrl
+    `--window-size=${viewport.width},${viewport.height}`,
+    '--virtual-time-budget=2500',
   ];
-
-  // NOTE: Do not use `shell: true` on Windows here; it breaks executable paths with spaces.
-  const res = spawnSync(browserExe, args, { stdio: 'inherit', shell: false });
   try {
-    fs.rmSync(userDataDir, { recursive: true, force: true });
-  } catch (err) {}
-  if (res.status !== 0) {
-    return { ok: false, reason: `chromium failed (rc=${res.status})` };
-  }
-  return { ok: true };
-}
-
-async function tryPlaywrightScreenshot(pageUrl, outPath, viewport) {
-  let playwright = null;
-  try {
-    // eslint-disable-next-line import/no-dynamic-require, global-require
-    playwright = require('playwright');
-  } catch (e) {
-    return { ok: false, reason: 'playwright not installed' };
-  }
-  if (!playwright || !playwright.chromium) {
-    return { ok: false, reason: 'playwright chromium not available' };
-  }
-
-  const [vw, vh] = viewport;
-  let browser = null;
-  try {
-    browser = await playwright.chromium.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-dev-shm-usage']
+    const shotRes = spawnSync(browserExe, [...baseArgs, `--screenshot=${outPath}`, pageUrl], {
+      shell: false,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 30000,
     });
-    const page = await browser.newPage({ viewport: { width: vw, height: vh } });
-    await page.goto(pageUrl, { waitUntil: 'load', timeout: 120000 });
-    // Wait for Prism highlighting to inject token spans.
-    try {
-      await page.waitForFunction(
-        () => {
-          const code = document.querySelector('pre code');
-          if (!code) return false;
-          if (code.querySelector('span.token')) return true;
-          return code.innerHTML.includes('<span');
-        },
-        { timeout: 5000 }
-      );
-    } catch (err) {
-      // If highlight didn't show up, still capture to aid debugging.
-      // This keeps behavior predictable for downstream LLM comparison.
+    if (shotRes.status !== 0) {
+      die(`chromium screenshot failed (rc=${shotRes.status})`, {
+        chromiumStdout: shotRes.stdout || '',
+        chromiumStderr: shotRes.stderr || '',
+      });
     }
-    await page.waitForTimeout(200);
-    await page.screenshot({ path: outPath });
-  } catch (e) {
-    return { ok: false, reason: `playwright failed: ${e && e.message ? e.message : String(e)}` };
+    diagnostics.success = true;
   } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (err) {}
-    }
+    try {
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+    } catch (err) {}
   }
-  return { ok: true };
-}
-
-function resolveHtmlEntry(repoDir, htmlArg, instanceId) {
-  if (htmlArg) {
-    if (path.isAbsolute(htmlArg)) {
-      return {
-        htmlPath: path.resolve(htmlArg),
-        pagePath: `/${path.basename(htmlArg)}`
-      };
-    }
-    const rel = htmlArg.replace(/^[\\/]+/, '');
-    return {
-      htmlPath: path.join(repoDir, rel),
-      pagePath: `/${rel.replace(/\\/g, '/')}`
-    };
-  }
-
-  return {
-    htmlPath: defaultHighlightTemplatePath(instanceId),
-    pagePath: '/code.html'
-  };
 }
 
 async function main() {
   const args = parseArgs(process.argv);
   const repoDir = args.repo ? path.resolve(args.repo) : '';
   const outPath = args.out ? path.resolve(args.out) : '';
-  const browserPath = findBrowserExecutable(args.chrome || '');
-  const mode = normalizeMode(args.mode);
-  const htmlArg = args.html ? String(args.html) : '';
   const instanceId = args['instance-id'] ? String(args['instance-id']) : '';
+  const htmlArg = args.html ? String(args.html) : 'code.html';
+  const buildCmd = args['build-cmd'] ? String(args['build-cmd']) : '';
+  const forceTemplate = String(args['force-template'] || '').toLowerCase() === 'true';
+  const diagnosticsPath = diagnosticsPathFor(outPath, args.diagnostics || '');
+  const browserPath = args.chrome ? String(args.chrome) : '';
+  const requestedMode = String(args.mode || '').trim().toLowerCase();
+  const timeoutMs = Number.parseInt(String(args['timeout-ms'] || '15000'), 10);
+  const waitAfterLoadMs = Number.parseInt(String(args['wait-after-load-ms'] || '500'), 10);
 
   if (!repoDir) die('missing --repo');
   if (!outPath) die('missing --out');
   if (!fs.existsSync(repoDir)) die(`repo does not exist: ${repoDir}`);
 
-  const htmlEntry = resolveHtmlEntry(repoDir, htmlArg, instanceId);
   ensureDir(path.dirname(outPath));
+  ensureDir(path.dirname(diagnosticsPath));
 
-  const server = http.createServer((req, res) => {
-    const parsed = url.parse(req.url || '');
-    const pathnameRaw = decodeURIComponent(parsed.pathname || '/');
-    const pathname = pathnameRaw === '/' ? htmlEntry.pagePath : pathnameRaw;
-
-    if (pathname === htmlEntry.pagePath) {
-      staticFile(res, htmlEntry.htmlPath, contentTypeFor(htmlEntry.htmlPath));
-      return;
-    }
-
-    const fullPath = safeJoin(repoDir, pathname);
-    if (!fullPath) {
-      res.writeHead(400);
-      res.end('bad request');
-      return;
-    }
-    staticFile(res, fullPath, contentTypeFor(fullPath));
-  });
-
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address();
-  const pageUrl = `http://127.0.0.1:${port}${htmlEntry.pagePath}`;
+  const diagnostics = {
+    repoDir,
+    outPath,
+    instanceId,
+    htmlArg,
+    diagnosticsPath,
+    build: null,
+    artifacts: [],
+    console: [],
+    pageErrors: [],
+    requestFailures: [],
+    httpFailures: [],
+    noHighlightWarnings: [],
+    pageState: null,
+    success: false,
+    timestamp: new Date().toISOString(),
+  };
 
   try {
-    const viewport = [1200, 800];
-    let finalMode = mode;
-    if (finalMode === 'auto') {
-      finalMode = 'playwright';
+    const { htmlPath, templatePath } = ensureHtmlFile(repoDir, htmlArg, instanceId, forceTemplate);
+    diagnostics.htmlPath = htmlPath;
+    diagnostics.templatePath = templatePath;
+    diagnostics.sourceHtml = fs.readFileSync(htmlPath, 'utf-8');
+
+    diagnostics.build = runBuildCommand(repoDir, buildCmd);
+    if (diagnostics.build.status !== 0) {
+      die(`build command failed: ${diagnostics.build.cmd || '(empty)'}`, { build: diagnostics.build });
     }
 
-    if (finalMode === 'playwright') {
-      const pw = await tryPlaywrightScreenshot(pageUrl, outPath, viewport);
-      if (!pw.ok) {
-        const chrom = tryChromiumScreenshot(browserPath, pageUrl, outPath, viewport);
-        if (!chrom.ok) {
-          die(`screenshot failed: playwright=${pw.reason}; chromium=${chrom.reason}`);
+    diagnostics.artifacts = assertBuildArtifacts(repoDir);
+
+    const staticRoots = Array.from(new Set([repoDir, path.dirname(htmlPath)].map((entry) => path.resolve(entry))));
+    const pagePath = `/${path.relative(repoDir, htmlPath).replace(/\\/g, '/')}`;
+    const viewport = {
+      width: Number.parseInt(String(args['viewport-width'] || DEFAULT_VIEWPORT.width), 10),
+      height: Number.parseInt(String(args['viewport-height'] || DEFAULT_VIEWPORT.height), 10),
+    };
+
+    const server = http.createServer((req, res) => {
+      res.setHeader('Connection', 'close');
+      const parsed = url.parse(req.url || '');
+      const pathnameRaw = decodeURIComponent(parsed.pathname || '/');
+      const pathname = pathnameRaw === '/' ? pagePath : pathnameRaw;
+
+      if (pathname === pagePath) {
+        staticFile(res, htmlPath, contentTypeFor(htmlPath));
+        return;
+      }
+      serveFromRoots(res, pathname, staticRoots);
+    });
+    server.keepAliveTimeout = 1;
+    server.headersTimeout = Math.max(timeoutMs, 15000) + 1000;
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address();
+    const pageUrl = `http://127.0.0.1:${port}${pagePath}`;
+    diagnostics.pageUrl = pageUrl;
+
+    try {
+      if (requestedMode === 'chromium' || requestedMode === 'chrome' || requestedMode === 'edge') {
+        const browserExe = findBrowserExecutable(browserPath);
+        if (!browserExe) {
+          die('requested chromium mode but no browser executable was found');
+        }
+        diagnostics.captureMode = 'chromium-cli';
+        captureWithChromiumCli(browserExe, pageUrl, outPath, diagnostics, viewport, diagnostics.sourceHtml);
+      } else {
+        try {
+          diagnostics.captureMode = 'playwright';
+          await captureWithPlaywright(pageUrl, outPath, diagnostics, viewport, timeoutMs, waitAfterLoadMs);
+        } catch (err) {
+          if (!String(err && err.message ? err.message : err).includes('playwright is not installed')) {
+            throw err;
+          }
+          const browserExe = findBrowserExecutable(browserPath);
+          if (!browserExe) {
+            throw err;
+          }
+          diagnostics.captureMode = 'chromium-cli';
+          captureWithChromiumCli(browserExe, pageUrl, outPath, diagnostics, viewport, diagnostics.sourceHtml);
         }
       }
-    } else {
-      const chrom = tryChromiumScreenshot(browserPath, pageUrl, outPath, viewport);
-      if (!chrom.ok) {
-        const pw = await tryPlaywrightScreenshot(pageUrl, outPath, viewport);
-        if (!pw.ok) {
-          die(`screenshot failed: chromium=${chrom.reason}; playwright=${pw.reason}`);
-        }
+    } finally {
+      if (typeof server.closeAllConnections === 'function') {
+        server.closeAllConnections();
       }
+      if (typeof server.closeIdleConnections === 'function') {
+        server.closeIdleConnections();
+      }
+      await new Promise((resolve) => server.close(resolve));
     }
 
-    if (!fs.existsSync(outPath) || fs.statSync(outPath).size <= 0) {
-      die(`screenshot missing/empty: ${outPath}`);
-    }
-    console.log(`[highlightjs-screenshot] wrote ${outPath}`);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
+    fs.writeFileSync(diagnosticsPath, JSON.stringify(diagnostics, null, 2), 'utf-8');
+    console.log(`[highlightjs-strict] wrote ${outPath}`);
+    console.log(`[highlightjs-strict] diagnostics ${diagnosticsPath}`);
+  } catch (err) {
+    diagnostics.error = String(err && err.stack ? err.stack : err);
+    fs.writeFileSync(diagnosticsPath, JSON.stringify(diagnostics, null, 2), 'utf-8');
+    console.error(`[highlightjs-strict] failed: ${diagnostics.error}`);
+    console.error(`[highlightjs-strict] diagnostics ${diagnosticsPath}`);
+    process.exit(1);
   }
 }
 
-main().catch((e) => die(e && (e.stack || e.message) ? (e.stack || e.message) : String(e)));
+main();

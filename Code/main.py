@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import logging
 import argparse
@@ -6,8 +7,12 @@ from contextlib import contextmanager
 from typing import cast
 from datasets import Dataset, load_dataset
 
-from Code.workflow import file_level_locating_val
-from Code.model_utils import is_claude_model
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from workflow import file_level_locating_val
+from model_utils import is_claude_model
 
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
@@ -31,6 +36,15 @@ def resolve_project_path(path_value: str) -> str:
     return os.path.normpath(os.path.join(project_root, path_value))
 
 
+def default_repo_path() -> str:
+    env_value = os.getenv("GUIREPAIR_REPO_PATH", "").strip()
+    if env_value:
+        return env_value
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    workspace_root = os.path.dirname(project_root)
+    return os.path.normpath(os.path.join(workspace_root, "Reproduce_Scenario"))
+
+
 def args_for_logging(args: argparse.Namespace) -> dict:
     data = vars(args).copy()
     if "openai_api_key" in data:
@@ -45,6 +59,38 @@ def split_instance_selectors(raw: str) -> list[str]:
     return [part.strip() for part in parts if part.strip()]
 
 
+def normalize_selector(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def selector_matches_instance(selector: str, instance_id: str, instance_info: dict) -> bool:
+    selector_norm = normalize_selector(selector)
+    if not selector_norm:
+        return False
+
+    instance_id_norm = normalize_selector(instance_id)
+    repo_norm = normalize_selector(instance_info.get("repo", "")) if isinstance(instance_info, dict) else ""
+
+    match_terms = {instance_id_norm}
+    if "__" in instance_id_norm:
+        match_terms.add(instance_id_norm.split("__", 1)[0])
+
+    if repo_norm:
+        match_terms.add(repo_norm)
+        if "/" in repo_norm:
+            repo_owner, repo_name = repo_norm.split("/", 1)
+            match_terms.add(repo_owner)
+            match_terms.add(repo_name)
+
+    if selector_norm in match_terms:
+        return True
+
+    return (
+        selector_norm in instance_id_norm
+        or (repo_norm != "" and selector_norm in repo_norm)
+    )
+
+
 def resolve_instance_targets(instance_selector_raw: str, dataset_dict: dict) -> list[str]:
     selectors = split_instance_selectors(instance_selector_raw)
     if not selectors:
@@ -55,12 +101,23 @@ def resolve_instance_targets(instance_selector_raw: str, dataset_dict: dict) -> 
     all_instance_ids = list(dataset_dict.keys())
 
     for selector in selectors:
-        if selector == "ALL":
+        selector_norm = normalize_selector(selector)
+
+        if selector_norm == "all":
             matches = all_instance_ids
-        elif selector in dataset_dict:
-            matches = [selector]
         else:
-            matches = [instance_id for instance_id in all_instance_ids if selector in instance_id]
+            exact_matches = [
+                instance_id for instance_id in all_instance_ids
+                if normalize_selector(instance_id) == selector_norm
+            ]
+            if exact_matches:
+                matches = exact_matches
+            else:
+                matches = [
+                    instance_id
+                    for instance_id in all_instance_ids
+                    if selector_matches_instance(selector, instance_id, dataset_dict.get(instance_id, {}))
+                ]
             if not matches:
                 raise ValueError(f"instance selector {selector!r} matched 0 dataset instances")
 
@@ -118,6 +175,7 @@ def get_args():
     parser.add_argument("--line_level_fl_samples", type=int, default=1)
     parser.add_argument("--patch_generation_temperature", type=float, default=0.0)
     parser.add_argument("--patch_generation_samples", type=int, default=1) 
+    parser.add_argument("--ground_patch_generation_samples", type=int, default=1)
 
     parser.add_argument("--bug_keywords_temperature", type=float, default=0.0)
     parser.add_argument("--bug_keywords_samples", type=int, default=1) 
@@ -156,9 +214,6 @@ def get_args():
     parser.add_argument("--Patch_Check", default=False)
     parser.add_argument("--Patch_Select", default=False)
     parser.add_argument("--Overwrite_Code0", default=False)
-    parser.add_argument("--Variant_Gen_By_LLM", default=False)
-    parser.add_argument("--Variant_LLM_Only", default=False)
-    parser.add_argument("--Variant_Max_Chars", type=int, default=120000)
     parser.add_argument("--Code_Reply", default=False)
     parser.add_argument("--File_Sort", default=False)
 
@@ -166,7 +221,7 @@ def get_args():
     parser.add_argument("--dataset", type=str, default="princeton-nlp/SWE-bench_Multimodal")
     parser.add_argument("--dataset_split", type=str, default="dev")
     parser.add_argument("--instance_id", type=str, default="chartjs__Chart.js-8868")
-    parser.add_argument("--repo_path", type=str, default="SWE-Bench-MM/Reproduce_Scenario")
+    parser.add_argument("--repo_path", type=str, default=default_repo_path())
 
     parser.add_argument(
         "--mock", action="store_true", help="Mock run to compute prompt tokens."
@@ -254,7 +309,6 @@ def fault_localization_process(instance_id, instance_info):
 
 def main():
     dataset_dict = get_dataset()
-    variant_failures_all = {}
 
     uses_claude = is_claude_model(args.base_model)
     has_openai_key = bool(args.openai_api_key or os.getenv("OPENAI_API_KEY"))
@@ -296,37 +350,6 @@ def main():
             logger.info(f'Repair Instance ID: {instance_id}')
 
         fault_localization_process(instance_id, dataset_dict[instance_id])
-        instance_output_dir = os.path.join(original_output_dir, args.dataset_split, instance_id.split('__')[0], instance_id)
-        vf = os.path.join(instance_output_dir, "variant_gen_failures.json")
-        if os.path.isfile(vf):
-            try:
-                variant_failures_all[instance_id] = read_json_file(vf)
-            except Exception:
-                pass
-
-    if variant_failures_all:
-        instances_file_too_large = []
-        for iid, payload in variant_failures_all.items():
-            try:
-                failures = payload.get("failures") if isinstance(payload, dict) else None
-                if isinstance(failures, list) and any((f.get("reason") == "file_too_large") for f in failures if isinstance(f, dict)):
-                    instances_file_too_large.append(iid)
-            except Exception:
-                pass
-        try:
-            save_json_file(
-                os.path.join(original_output_dir, "variant_gen_failures_all.json"),
-                {
-                    "dataset_split": args.dataset_split,
-                    "variant_gen_by_llm": args.Variant_Gen_By_LLM,
-                    "variant_llm_only": args.Variant_LLM_Only,
-                    "variant_max_chars": args.Variant_Max_Chars,
-                    "instances_file_too_large": instances_file_too_large,
-                    "instances": variant_failures_all,
-                },
-            )
-        except Exception:
-            pass
 
 
 if __name__ == '__main__':
