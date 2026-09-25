@@ -490,8 +490,91 @@ IMPORTANT:
 # Stage 5: Visual validation and validation-environment preparation
 # ---------------------------------------------------------------------------
 
+REPOSITORY_CODE_TEMPLATE_CONSTRUCTION = PromptSpec(
+    stage="5.1 Repository-level code-template construction",
+    purpose=(
+        "Constructs and validates a minimal reusable browser-rendering template the "
+        "first time a repository is encountered. The template is built exclusively "
+        "from repository structure and official documentation, then cached by "
+        "repository identity for later issue-specific reproduction."
+    ),
+    source="Repository bootstrap stage (reviewer-facing methodology prompt)",
+    inputs=("repository_identity", "repository_structure", "official_documentation"),
+    system_prompt=r"""You are an expert software engineer responsible for constructing a reusable, minimal, browser-runnable code template for visual validation of a software repository.
+
+This is a repository-level bootstrap task, not an issue-level repair task. You may use ONLY:
+1. The repository identity.
+2. The repository structure.
+3. Official repository documentation supplied by the user.
+
+Strict isolation requirements:
+- Do not request, access, or infer any issue report, issue-specific image, candidate patch, pull request, test result, or gold patch.
+- Do not encode behavior that is specific to any benchmark instance.
+- Do not use implementation knowledge that is absent from the supplied repository structure and official documentation.
+- The resulting template must be reusable across multiple issues from the same repository.
+
+Template requirements:
+- Create the smallest complete set of files needed to launch a deterministic browser rendering.
+- Use the repository-under-test or its local build output. Do not replace it with a CDN or external package version, because later candidate patches must affect the rendered result.
+- Preserve only the setup, imports, containers, initialization, and rendering lifecycle required by the documented public API.
+- Mark issue-specific insertion points with explicit placeholders such as {{ISSUE_CONTENT}}, {{ISSUE_DATA}}, or {{ISSUE_OPTIONS}}.
+- Keep issue-specific content out of the reusable template.
+- Provide deterministic install, build, launch, readiness, and capture instructions.
+- Prefer a single entry page and the fewest possible dependencies.
+
+Return JSON only, using this schema:
+{
+  "repository_identity": "owner/repository",
+  "template_files": [
+    {
+      "path": "relative/path/to/file",
+      "purpose": "why this file is required",
+      "content": "complete file content with explicit issue-specific placeholders"
+    }
+  ],
+  "install_command": "command or empty string",
+  "build_command": "command or empty string",
+  "run_command": "command that starts the rendering environment",
+  "entry_url": "browser URL used for capture",
+  "readiness_condition": "deterministic condition indicating that rendering is ready",
+  "validation_steps": ["steps used to verify that the base template runs"],
+  "assumptions": ["assumptions supported by the supplied official documentation"]
+}
+
+Output no markdown and no text outside the JSON object.
+""",
+    user_prompt=r"""Construct a minimal, reusable browser-rendering template for the repository below.
+
+The template will be validated once and stored under the repository identity. For each future issue, a separate stage will fill its explicit placeholders with content extracted from that issue's description and visual attachment. Candidate patches will then be applied to the repository-under-test and rendered through the instantiated template for visual comparison.
+
+Do not use any issue report, visual attachment, candidate patch, or gold patch in this task.
+
+* Repository Identity
+```
+{repository_identity}
+```
+
+* Repository Structure
+```
+{repository_structure}
+```
+
+* Official Repository Documentation
+```markdown
+{official_documentation}
+```
+""",
+    notes=(
+        "The generated template is validated before caching and is retrieved by "
+        "repository identity. Visual validation supports candidate assessment only; "
+        "final correctness is determined independently by the official SWE-bench "
+        "Multimodal test harness."
+    ),
+)
+
+
 VISUAL_REPAIR_FEEDBACK = PromptSpec(
-    stage="5.1 Before/after visual repair validation",
+    stage="5.4 Before/after visual repair validation",
     purpose=(
         "Infers the expected rendering from the issue and original screenshots, then "
         "compares the buggy and patched renderings to determine whether the visual "
@@ -533,10 +616,11 @@ I will give you the bug image and patch image. Compare them and analyze whether 
 
 
 VALIDATION_HTML_GENERATION = PromptSpec(
-    stage="5.2 Validation HTML reconstruction",
+    stage="5.3 Issue-specific template instantiation",
     purpose=(
-        "Combines code visible in screenshots with an existing HTML template to build "
-        "a complete page for visual validation."
+        "Fills a cached repository template with issue-specific content extracted from "
+        "the issue context and screenshots, producing a complete page for visual "
+        "reproduction and candidate-patch validation."
     ),
     source="Tools/validation/validation_tools.py::generate_html_from_images_with_template_via_llm",
     inputs=("issue_excerpt", "template_html", "bug_images"),
@@ -570,7 +654,7 @@ Template HTML:
 
 
 SCREENSHOT_CODE_EXTRACTION = PromptSpec(
-    stage="5.3 Screenshot code extraction",
+    stage="5.2 Screenshot code extraction",
     purpose=(
         "Extracts raw source text and its language from code-centric screenshots so "
         "the page can be reproduced with an existing syntax-highlighting template."
@@ -615,9 +699,10 @@ PROMPT_CATALOG = (
     PATCH_GENERATION,
     PATCH_BUILD_REFINEMENT,
     PATCH_SELECTION,
-    VISUAL_REPAIR_FEEDBACK,
-    VALIDATION_HTML_GENERATION,
+    REPOSITORY_CODE_TEMPLATE_CONSTRUCTION,
     SCREENSHOT_CODE_EXTRACTION,
+    VALIDATION_HTML_GENERATION,
+    VISUAL_REPAIR_FEEDBACK,
 )
 
 
